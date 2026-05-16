@@ -1,0 +1,6 @@
+{
+  "name": "KhmerDub Studio Pro",
+  "description": "Professional Khmer AI Dubbing Studio with automatic emotion detection, speaker management, and high-fidelity TTS synthesis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

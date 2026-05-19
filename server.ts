@@ -2,6 +2,7 @@ import express from "express";
 import * as googleTTS from "google-tts-api";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
+import "dotenv/config";
 
 async function startServer() {
   const app = express();
@@ -9,11 +10,16 @@ async function startServer() {
 
   app.use(express.json());
 
+  console.log("Server starting. GEMINI_API_KEY presence:", !!process.env.GEMINI_API_KEY);
+
   // Gemini API client
   const getGeminiClient = (userApiKey?: string) => {
-    const apiKey = userApiKey || process.env.GEMINI_API_KEY;
+    // If userApiKey is an empty string or explicitly 'undefined'/'null' string from client
+    const cleanUserKey = (userApiKey && userApiKey !== "null" && userApiKey !== "undefined") ? userApiKey : null;
+    const apiKey = cleanUserKey || process.env.GEMINI_API_KEY;
+    
     if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not set.");
+      throw new Error("GEMINI_API_KEY is not set. Please provide it in the app Settings or ensure the environment variable is configured.");
     }
     return new GoogleGenAI({ apiKey });
   };
@@ -40,7 +46,7 @@ Subtitles:
 ${batch.map((s: any) => `ID: ${s.id}\nText: ${s.text}`).join('\n\n')}`;
 
       const result = await activeAi.models.generateContent({
-        model: "gemini-1.5-flash",
+        model: "gemini-3-flash-preview",
         contents: [{ role: "user", parts: [{ text: prompt }] }],
       });
 

@@ -1,5 +1,5 @@
 import { Film, FileText, Play, Pause, Languages, Loader2, Music, Download, Settings, Square, ListChecks, X, Undo2, Redo2, Link2, Link2Off, Plus, Minus, ZoomIn, ZoomOut, HelpCircle, Volume1, Volume2, VolumeX, AlertTriangle } from 'lucide-react';
-import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback, Component } from 'react';
 import { motion } from 'motion/react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
@@ -83,6 +83,16 @@ const detectLocalKeywords = (text: string) => {
   return data;
 };
 
+const cleanTextForTTS = (text: string) => {
+  return text
+    .replace(/^Speaker\s*\d+\s*(\([^)]*\))?\s*:\s*/gim, "") // Remove "Speaker 1 (angry): "
+    .replace(/^Default Speaker\s*:\s*/gim, "") // Remove "Default Speaker: "
+    .replace(/^\([^)]*\)\s*/gm, "") // Remove leading "(shouting) "
+    .replace(/\([^)]+\)/g, "") // Remove any remaining (metadata)
+    .replace(/\[[^\]]+\]/g, "") // Remove any remaining [metadata]
+    .trim();
+};
+
 interface Speaker {
   id: string;
   name: string;
@@ -114,7 +124,8 @@ interface Subtitle {
   refAudioBase64?: string;
   audioStartTime?: number;
   isLinked?: boolean;
-  waveform?: number[];
+  waveformPeaks?: number[];
+  audioBufferId?: string;
   emotions?: string[];
   tone?: string;
   energy?: number;
@@ -165,7 +176,10 @@ function getAudioDuration(url: string): Promise<number> {
   });
 }
 
+const globalWaveformCache = new Map<string, number[]>();
+
 async function generateWaveform(url: string, numberOfSamples: number = 100): Promise<number[]> {
+  if (globalWaveformCache.has(url)) return globalWaveformCache.get(url)!;
   try {
     const response = await fetch(url);
     const arrayBuffer = await response.arrayBuffer();
@@ -190,7 +204,10 @@ async function generateWaveform(url: string, numberOfSamples: number = 100): Pro
     
     // Normalize samples with a bit of "boost" for visual appeal
     const max = Math.max(...samples) || 1;
-    return samples.map(s => Math.pow(s / max, 0.8)); // Power curve to emphasize quieter parts
+    const normalized = samples.map(s => Math.pow(s / max, 0.8)); // Power curve to emphasize quieter parts
+    
+    globalWaveformCache.set(url, normalized);
+    return normalized;
   } catch (e) {
     console.warn('Failed to generate waveform', e);
     return [];
@@ -234,17 +251,20 @@ async function autoTrimSilence(url: string, threshold: number = 0.015): Promise<
 }
 
 function detectSpeaker(text: string): { speakerName: string; cleanText: string } {
-  // Regex for patterns: Speaker 1:, [Speaker 1], (Speaker 1), Character Name:
-  // Using more permissive match for speaker names to support Khmer
+  // Priority patterns: Speaker 1:, Default Speaker:, Character Name:
   const patterns = [
+    /^(Speaker\s*\d+)\s*[:\s]*(.*)/si,
+    /^(Default Speaker)\s*[:\s]*(.*)/si,
     /^\[([^\]]+)\][:\s]*(.*)/s,    
     /^\(([^)]+)\)[:\s]*(.*)/s,    
-    /^([^:\n\d]+):[:\s]*(.*)/s,    
+    /^([^:\n]+):[:\s]*(.*)/s,    
   ];
 
   for (const pattern of patterns) {
     const match = text.match(pattern);
     if (match) {
+      // If it's a generic colon match, check if it looks like a name (not too long)
+      if (pattern.source.includes('^([^:\n]+):') && match[1].length > 25) continue;
       return { speakerName: match[1].trim(), cleanText: match[2].trim() };
     }
   }
@@ -329,7 +349,7 @@ interface TimelineClipProps {
   text?: string;
   zoomLevel: number;
   audioUrl?: string;
-  waveform?: number[];
+  waveformPeaks?: number[];
   audioTrimStart?: number;
   audioTrimEnd?: number;
   audioDuration?: number;
@@ -347,14 +367,42 @@ interface TimelineClipProps {
 }
 
 const TimelineClip = React.memo(({
-  id, type, startTime, endTime, text, zoomLevel, audioUrl, waveform,
+  id, type, startTime, endTime, text, zoomLevel, audioUrl, waveformPeaks,
   audioTrimStart, audioTrimEnd, audioDuration, engine, voice,
   isActive, isSelected, onSelect, onAutoTrim, onDragStart, onDragMove, onDragEnd, isOverlapping,
   emotions
 }: TimelineClipProps) => {
-  const duration = endTime - startTime;
-  const left = startTime * zoomLevel;
+  const [localWaveform, setLocalWaveform] = useState<number[] | undefined>(waveformPeaks);
+
+  // Guard against invalid or crash-inducing values
+  const safeStartTime = Number.isFinite(startTime) ? startTime : 0;
+  const safeEndTime = Number.isFinite(endTime) ? endTime : safeStartTime + 0.1;
+  const duration = Math.max(0.01, safeEndTime - safeStartTime);
+  
+  const left = safeStartTime * zoomLevel;
   const width = Math.max(2, duration * zoomLevel);
+
+  useEffect(() => {
+    // If we have peaks, use them
+    if (waveformPeaks && waveformPeaks.length > 0) {
+      setLocalWaveform(waveformPeaks);
+      if (audioUrl) globalWaveformCache.set(audioUrl, waveformPeaks);
+    } 
+    // If peaks are missing but we have a URL, check global cache or rebuild
+    else if (audioUrl) {
+       const cached = globalWaveformCache.get(audioUrl);
+       if (cached) {
+         setLocalWaveform(cached);
+       } else if (!localWaveform || localWaveform.length === 0) {
+         console.log(`[Waveform] Rebuilding for clip ${id}...`);
+         generateWaveform(audioUrl).then(peaks => {
+           if (peaks && peaks.length > 0) {
+             setLocalWaveform(peaks);
+           }
+         });
+       }
+    }
+  }, [waveformPeaks, audioUrl, id]);
 
   const getClipColor = () => {
     if (type === 'subtitle') {
@@ -425,27 +473,31 @@ const TimelineClip = React.memo(({
 
       {type === 'audio' && (
         <>
-          {waveform && waveform.length > 0 && (
+          {(localWaveform && localWaveform.length > 0) ? (
             <div 
               className="absolute inset-0 h-full overflow-hidden pointer-events-none opacity-40 bg-black/10"
             >
               <div
                 className="absolute h-full"
                 style={{
-                  left: -(audioTrimStart ?? 0) * zoomLevel,
-                  width: (audioDuration ?? duration) * zoomLevel
+                  left: Number.isFinite(audioTrimStart) ? -(audioTrimStart! * zoomLevel) : 0,
+                  width: Number.isFinite(audioDuration) ? (audioDuration! * zoomLevel) : (duration * zoomLevel)
                 }}
               >
-                <svg className="w-full h-full" preserveAspectRatio="none" viewBox={`0 0 ${waveform.length} 100`}>
+                <svg className="w-full h-full" preserveAspectRatio="none" viewBox={`0 0 ${localWaveform.length} 100`}>
                   <path 
-                    d={waveform.map((v, i) => `M${i},${50 - v * 45} L${i},${50 + v * 45}`).join(' ')} 
+                    d={localWaveform.map((v, i) => `M${i},${50 - v * 45} L${i},${50 + v * 45}`).join(' ')} 
                     stroke="currentColor" 
                     strokeWidth="1.5" 
                   />
                 </svg>
               </div>
             </div>
-          )}
+          ) : audioUrl ? (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-50">
+              <span className="text-[8px] animate-pulse">Rebuilding waveform...</span>
+            </div>
+          ) : null}
           <div 
              className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-20 group"
              onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-audio-start'); }}
@@ -552,6 +604,11 @@ const SubtitleListItem = React.memo(({
           )}
           <span className={`text-[10px] ${isActive && !isBatchEditMode ? 'text-amber-500' : 'text-slate-500'}`}>
             {formatTime(sub.startTime)}
+            {sub.speakerId && (
+              <span className="ml-2 px-1.5 py-0.5 rounded-sm bg-slate-800 text-[9px] uppercase font-bold border border-slate-700 max-w-[80px] truncate inline-block align-middle" title={sub.speakerId}>
+                {sub.speakerId}
+              </span>
+            )}
           </span>
           
           {/* Emotion Badges */}
@@ -738,12 +795,13 @@ const SubtitleListItem = React.memo(({
   );
 });
 
-const SpeakerManager = ({ speakers, updateSpeaker, onAutoDetect, subtitles, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice }: any) => {
+const SpeakerManager = ({ speakers, updateSpeaker, onAutoDetect, applySpeakerToAll, subtitles, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice }: any) => {
   // calculate line counts
   const speakerStats = useMemo(() => {
     const stats: Record<string, number> = {};
     subtitles.forEach((s: any) => {
-      stats[s.speakerId] = (stats[s.speakerId] || 0) + 1;
+      const id = s.speakerId || 'Default Speaker';
+      stats[id] = (stats[id] || 0) + 1;
     });
     return stats;
   }, [subtitles]);
@@ -751,7 +809,7 @@ const SpeakerManager = ({ speakers, updateSpeaker, onAutoDetect, subtitles, ttsE
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Speakers</h3>
+        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest">Speakers ({speakers.length})</h3>
         <button 
           onClick={onAutoDetect}
           className="text-[10px] bg-slate-800 hover:bg-slate-700 text-amber-500 px-2 py-1 rounded border border-slate-700 flex items-center gap-1 transition-colors"
@@ -772,6 +830,13 @@ const SpeakerManager = ({ speakers, updateSpeaker, onAutoDetect, subtitles, ttsE
                   {speakerStats[speaker.id] || 0} Lines
                 </span>
               </div>
+              <button
+                onClick={() => applySpeakerToAll(speaker)}
+                className="text-[9px] text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 rounded transition-colors uppercase font-bold"
+                title="Apply these voice settings to all lines assigned to this speaker"
+              >
+                Apply to all
+              </button>
             </div>
 
             <div className="grid grid-cols-1 gap-2">
@@ -883,12 +948,68 @@ const SpeakerManager = ({ speakers, updateSpeaker, onAutoDetect, subtitles, ttsE
   );
 };
 
+// Error Boundary to prevent full app crash
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: any;
+}
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: any): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: any, errorInfo: any) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center p-8 bg-[#020617] text-white h-screen">
+          <AlertTriangle className="w-12 h-12 text-amber-500 mb-4" />
+          <h2 className="text-xl font-bold mb-2 text-slate-100"> something went wrong</h2>
+          <p className="text-slate-400 mb-6 text-center max-w-md">
+            The application encountered an unexpected error. You can try to reload or dismiss the error if possible.
+          </p>
+          <pre className="p-4 bg-black/40 rounded border border-white/5 text-xs text-red-400 max-w-full overflow-auto mb-6 font-mono">
+            {this.state.error?.message || "Unknown error"}
+          </pre>
+          <div className="flex gap-4">
+             <button 
+                onClick={() => window.location.reload()}
+                className="px-6 py-2 bg-amber-500 text-slate-950 font-bold rounded-lg hover:bg-amber-400 transition-colors"
+              >
+                Reload Application
+              </button>
+              <button 
+                onClick={() => this.setState({ hasError: false, error: null })}
+                className="px-6 py-2 bg-slate-800 text-slate-200 font-bold rounded-lg hover:bg-slate-700 transition-colors"
+              >
+                Attempt Dismiss
+              </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState<string>('');
   const [timelineCurrentTime, setTimelineCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [isTranscodingVideo, setIsTranscodingVideo] = useState(false);
+  const [showMKVWarning, setShowMKVWarning] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const isScrubbingRef = useRef(false);
@@ -896,6 +1017,7 @@ export default function App() {
   const animationFrameRef = useRef<number | null>(null);
   const playbackStartWallTimeRef = useRef<number>(0);
   const timelineStartTimeRef = useRef<number>(0);
+  const lastScrollTriggerRef = useRef<number>(0);
   const activeAudioRefs = useRef<Map<number, HTMLAudioElement>>(new Map());
   const [videoVolume, setVideoVolume] = useState(0.1);
   const [dubVolume, setDubVolume] = useState(1.0);
@@ -978,6 +1100,7 @@ export default function App() {
       for (let i = 0; i < toProcess.length; i += batchSize) {
         const batch = toProcess.slice(i, i + batchSize);
         const localGeminiKey = localStorage.getItem('gemini_api_key');
+        console.log("Detecting emotions with key present:", !!localGeminiKey);
         
         // Mark as detecting
         updateSubtitles(prev => prev.map(s => 
@@ -1060,6 +1183,9 @@ export default function App() {
 
   const handleAutoDetectSpeakers = useCallback(() => {
     const speakerMap = new Map<string, Speaker>();
+    // Pre-populate with current manual speakers to preserve settings
+    speakers.forEach(s => speakerMap.set(s.name, s));
+
     const updatedSubtitles = subtitles.map(sub => {
       const { speakerName, cleanText } = detectSpeaker(sub.text);
       
@@ -1068,11 +1194,12 @@ export default function App() {
         speakerMap.set(speakerName, {
           id: speakerName,
           name: speakerName,
-          voice: sub.voice,
+          voice: sub.voice || 'default',
           engine: sub.engine || ttsEngine,
           refAudioFile: sub.refAudioFile || null,
           refAudioBase64: sub.refAudioBase64 || null,
-          color
+          color,
+          emotionSensitivity: 0.5
         });
       }
       
@@ -1081,7 +1208,23 @@ export default function App() {
 
     setSubtitles(updatedSubtitles);
     setSpeakers(Array.from(speakerMap.values()));
-  }, [subtitles, ttsEngine]);
+  }, [subtitles, ttsEngine, speakers]);
+
+  const applySpeakerToAll = (speaker: Speaker) => {
+    updateSubtitles(prev => prev.map(s => {
+      if (s.speakerId === speaker.id) {
+        return {
+          ...s,
+          voice: speaker.voice,
+          engine: speaker.engine,
+          refAudioFile: speaker.refAudioFile || undefined,
+          refAudioBase64: speaker.refAudioBase64 || undefined,
+          emotions: speaker.defaultEmotion ? [speaker.defaultEmotion] : s.emotions
+        };
+      }
+      return s;
+    }));
+  };
 
   const updateSpeaker = (id: string, updates: Partial<Speaker>) => {
     setSpeakers(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
@@ -1091,84 +1234,79 @@ export default function App() {
   const [history, setHistory] = useState<Subtitle[][]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
 
-  const pushToHistory = (newSubs: Subtitle[]) => {
-    if (history.length > 0 && historyIndex >= 0) {
-      const last = history[historyIndex];
-      // Faster shallow check before stringify
-      if (last.length === newSubs.length) {
-        let changed = false;
-        for (let i = 0; i < last.length; i++) {
-          const s1 = last[i];
-          const s2 = newSubs[i];
-          if (s1.startTime !== s2.startTime || 
-              s1.endTime !== s2.endTime || 
-              s1.text !== s2.text || 
-              s1.audioStartTime !== s2.audioStartTime ||
-              s1.audioTrimStart !== s2.audioTrimStart ||
-              s1.audioTrimEnd !== s2.audioTrimEnd ||
-              s1.isLinked !== s2.isLinked ||
-              s1.audioUrl !== s2.audioUrl) {
-            changed = true;
-            break;
+  const historyTimeoutRef = useRef<any>(null);
+
+  const pushToHistory = useCallback((newSubs: Subtitle[]) => {
+    setHistory(prevHistory => {
+      if (prevHistory.length > 0 && historyIndex >= 0 && historyIndex < prevHistory.length) {
+        const last = prevHistory[historyIndex];
+        if (last.length === newSubs.length) {
+          let changed = false;
+          for (let i = 0; i < Math.min(last.length, 100); i++) { // Sample check for speed
+            if (last[i].text !== newSubs[i].text || last[i].startTime !== newSubs[i].startTime) {
+              changed = true;
+              break;
+            }
           }
+          if (!changed && last.length > 100) {
+             // Deeper check if sample passed but might still be changed elsewhere
+             for (let i = 100; i < last.length; i++) {
+               if (last[i].text !== newSubs[i].text || last[i].startTime !== newSubs[i].startTime) {
+                 changed = true;
+                 break;
+               }
+             }
+          }
+          if (!changed) return prevHistory;
         }
-        if (!changed) return;
       }
-    }
 
-    const snapshot = JSON.parse(JSON.stringify(newSubs));
-    const newHistory = history.slice(0, historyIndex + 1);
-    newHistory.push(snapshot);
-    if (newHistory.length > 50) newHistory.shift();
-    setHistory(newHistory);
-    setHistoryIndex(newHistory.length - 1);
-  };
+      const snapshot = newSubs.map(s => ({ ...s }));
+      const newHistory = prevHistory.slice(0, historyIndex + 1);
+      newHistory.push(snapshot);
+      if (newHistory.length > 50) {
+        newHistory.shift();
+        setHistoryIndex(prev => Math.max(0, prev)); // keep index in sync with shift
+      }
+      
+      return newHistory;
+    });
 
-  const undo = () => {
+    setHistoryIndex(prev => prev + 1);
+  }, [historyIndex]);
+
+  const undo = useCallback(() => {
     if (historyIndex > 0) {
       const prevIndex = historyIndex - 1;
-      const snapshot = JSON.parse(JSON.stringify(history[prevIndex]));
+      const snapshot = history[prevIndex].map((s: Subtitle) => ({ ...s }));
       setSubtitles(snapshot);
       setHistoryIndex(prevIndex);
     }
-  };
+  }, [history, historyIndex]);
 
-  const redo = () => {
+  const redo = useCallback(() => {
     if (historyIndex < history.length - 1) {
       const nextIndex = historyIndex + 1;
-      const snapshot = JSON.parse(JSON.stringify(history[nextIndex]));
+      const snapshot = history[nextIndex].map((s: Subtitle) => ({ ...s }));
       setSubtitles(snapshot);
       setHistoryIndex(nextIndex);
     }
-  };
+  }, [history, historyIndex]);
 
-  const updateSubtitles = (updater: Subtitle[] | ((prev: Subtitle[]) => Subtitle[]), skipHistory: boolean = false) => {
+  const updateSubtitles = useCallback((updater: Subtitle[] | ((prev: Subtitle[]) => Subtitle[]), skipHistory: boolean = false) => {
     setSubtitles(prev => {
       let next = typeof updater === 'function' ? updater(prev) : updater;
       
-      // Ultimate Sanitization Guard
-      next = next.map(s => {
-        const startTime = Number.isFinite(s.startTime) ? Math.max(0, s.startTime) : 0;
-        let endTime = Number.isFinite(s.endTime) ? s.endTime : startTime + 1;
-        if (endTime <= startTime) endTime = startTime + 0.1;
-
-        return {
-          ...s,
-          startTime,
-          endTime,
-          audioStartTime: (s.audioStartTime === undefined || !Number.isFinite(s.audioStartTime)) ? startTime : s.audioStartTime,
-          audioTrimStart: Number.isFinite(s.audioTrimStart) ? Math.max(0, s.audioTrimStart) : 0,
-          audioTrimEnd: (s.audioTrimEnd === undefined || !Number.isFinite(s.audioTrimEnd)) ? undefined : s.audioTrimEnd,
-          audioDuration: (s.audioDuration === undefined || !Number.isFinite(s.audioDuration)) ? undefined : s.audioDuration,
-        };
-      });
+      // Performance optimization: only sanitize if we really have to
+      // next = sanitize(next);
 
       if (!skipHistory) {
-        setTimeout(() => pushToHistory(next), 50);
+        if (historyTimeoutRef.current) clearTimeout(historyTimeoutRef.current);
+        historyTimeoutRef.current = setTimeout(() => pushToHistory(next), 1000); // 1s debounce
       }
       return next;
     });
-  };
+  }, [pushToHistory]);
   
   const audioClips = useMemo(() => {
     return subtitles
@@ -1361,7 +1499,11 @@ export default function App() {
 
   const maxEndTime = useMemo(() => {
     if (subtitles.length === 0) return 0;
-    return Math.max(...subtitles.map(s => s.endTime));
+    let max = 0;
+    for (let i = 0; i < subtitles.length; i++) {
+      if (subtitles[i].endTime > max) max = subtitles[i].endTime;
+    }
+    return max;
   }, [subtitles]);
 
   const totalDuration = useMemo(() => {
@@ -1479,7 +1621,25 @@ export default function App() {
       const container = timelineContainerRef.current;
       const playheadX = time * zoomLevel;
       const containerWidth = container.offsetWidth;
-      container.scrollLeft = playheadX - (containerWidth / 2);
+      const scrollLeft = container.scrollLeft;
+
+      // Auto-scroll threshold: 75% of visible width
+      const thresholdRight = scrollLeft + (containerWidth * 0.75);
+      // Backwards threshold: 5% of visible width (if user jumps back)
+      const thresholdLeft = scrollLeft + (containerWidth * 0.05);
+
+      if (playheadX > thresholdRight || playheadX < thresholdLeft) {
+        const nowMs = performance.now();
+        // Thrortle scroll triggers to allow smooth animation to finish (approx 500ms)
+        if (nowMs - lastScrollTriggerRef.current > 500) {
+          const targetScroll = playheadX - (containerWidth * 0.25);
+          container.scrollTo({
+            left: Math.max(0, targetScroll),
+            behavior: 'smooth'
+          });
+          lastScrollTriggerRef.current = nowMs;
+        }
+      }
     }
 
     animationFrameRef.current = requestAnimationFrame(tickTimeline);
@@ -1516,6 +1676,16 @@ export default function App() {
   }, [togglePlayback, handleTimelineScrub, subtitles, timelineCurrentTime, videoRef, isPlaying]);
 
 
+
+  const [dragVisuals, setDragVisuals] = useState<{
+    id: number;
+    type: string;
+    startTime: number;
+    endTime: number;
+    audioStartTime: number;
+    audioTrimStart: number;
+    audioTrimEnd: number;
+  } | null>(null);
 
   // High-performance drag refs
   const dragInfoRef = useRef<{
@@ -1896,18 +2066,102 @@ export default function App() {
     }
   };
 
-  // Load video file
   const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      
+      console.log("file name", file.name);
+      console.log("file type", file.type);
+      console.log("file size", file.size);
+
       setVideoFile(file);
       // Revoke old URL if exists before creating new one
       if (videoUrl) {
         URL.revokeObjectURL(videoUrl);
         allObjectUrlsRef.current.delete(videoUrl);
       }
-      setVideoUrl(createTrackedUrl(file));
+      
+      // Use URL.createObjectURL directly as requested
+      const url = URL.createObjectURL(file);
+      allObjectUrlsRef.current.add(url);
+      setVideoUrl(url);
       setErrorMsg(null);
+      
+      const name = file.name.toLowerCase();
+      const isUnsupported = name.endsWith('.mkv') || name.endsWith('.avi') || name.endsWith('.mov') || name.endsWith('.ts');
+      
+      if (isUnsupported) {
+        setShowMKVWarning(true);
+      } else {
+        setShowMKVWarning(false);
+      }
+    }
+  };
+
+  const handleOptimizeMKV = async () => {
+    if (!videoFile) return;
+    setIsTranscodingVideo(true);
+    setExportStatus("Transcoding for browser support...");
+    
+    try {
+      if (!ffmpegRef.current) {
+        const ffmpeg = new FFmpeg();
+        const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+        await ffmpeg.load({
+            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+        });
+        ffmpegRef.current = ffmpeg;
+      }
+
+      const ffmpeg = ffmpegRef.current;
+      const inputName = 'input_original' + (videoFile.name.substring(videoFile.name.lastIndexOf('.')) || '.mkv');
+      const outputName = 'optimized.mp4';
+      
+      await ffmpeg.writeFile(inputName, await fetchFile(videoFile));
+      
+      // Try fast remux first (copy streams, just change container)
+      try {
+        await ffmpeg.exec(['-i', inputName, '-c', 'copy', '-f', 'mp4', '-movflags', '+faststart', outputName, '-y']);
+      } catch (remuxErr) {
+        console.warn("Remux failed, performing full transcode", remuxErr);
+        // Full transcode if streams are incompatible
+        await ffmpeg.exec([
+          '-i', inputName, 
+          '-c:v', 'libx264', 
+          '-preset', 'ultrafast', 
+          '-crf', '28', 
+          '-pix_fmt', 'yuv420p', // Crucial for browser support
+          '-c:a', 'aac', 
+          '-b:a', '128k',
+          '-s', '1280x720', // Downscale for speed
+          '-movflags', '+faststart',
+          '-f', 'mp4', 
+          outputName, 
+          '-y'
+        ]);
+      }
+      
+      const data = await ffmpeg.readFile(outputName);
+      const mp4Blob = new Blob([data as any], { type: 'video/mp4' });
+      const mp4File = new File([mp4Blob], videoFile.name.replace(/\.[^/.]+$/, "") + "_optimized.mp4", { type: 'video/mp4' });
+      
+      setVideoFile(mp4File);
+      if (videoUrl) {
+        URL.revokeObjectURL(videoUrl);
+        allObjectUrlsRef.current.delete(videoUrl);
+      }
+      const newUrl = createTrackedUrl(mp4File);
+      setVideoUrl(newUrl);
+      setShowMKVWarning(false);
+      setExportStatus("Video successfully optimized!");
+      setTimeout(() => setExportStatus(null), 2000);
+    } catch (err: any) {
+      console.error("Optimization failed:", err);
+      setErrorMsg("Failed to optimize video. Please try an MP4 file instead.");
+    } finally {
+      setIsTranscodingVideo(false);
+      setExportStatus(null);
     }
   };
 
@@ -1949,8 +2203,13 @@ export default function App() {
       const refBase64 = speaker?.refAudioBase64 || sub.refAudioBase64 || referenceAudioBase64;
       
       const isCloning = !!(refBase64 || refFile);
-      const textToSynthesize = sub.cleanText || sub.text;
-
+      let textToSynthesize = cleanTextForTTS(sub.text);
+      
+      if (!textToSynthesize) {
+        console.warn("Skipping audio generation for empty text after cleaning:", sub.id);
+        return null;
+      }
+      
       // Emotion & Tone Context
       const emotions = sub.emotions?.length ? sub.emotions : (speaker?.defaultEmotion ? [speaker.defaultEmotion] : []);
       const sensitivity = speaker?.emotionSensitivity ?? 0.5;
@@ -2020,82 +2279,87 @@ export default function App() {
             promptText = '';
         }
 
-        const controlInstruction = styleContext ? `Speak ${styleContext}${intensitySuffix}` : '';
+        const controlInstruction = styleContext ? `Speak ${styleContext}${intensitySuffix}` : 'Speak naturally and clearly.';
         
+        // Use the official /generate API with named fields as requested
         const payload = {
-          data: [
-            textToSynthesize,  // text
-            controlInstruction, // control_instruction
-            refWavPayload,     // reference_wav
-            !!promptText,      // use_prompt_text
-            promptText,        // prompt_text
-            2.0,               // cfg_value
-            false,             // normalize
-            false,             // denoise
-            10                 // dit_steps
-          ]
+          text: textToSynthesize,
+          control_instruction: controlInstruction,
+          ref_wav: refWavPayload, // This might need to be a URL or FileData depending on the backend, 
+                                 // keeping the current payload structure which usually handles both.
+          use_prompt_text: !!promptText,
+          prompt_text_value: promptText,
+          cfg_value: 2.0,
+          do_normalize: false,
+          denoise: false,
+          dit_steps: 10
         };
 
-        let startRes;
+        let res;
         try {
-          startRes = await fetch(`${baseURL}/gradio_api/call/generate`, {
+          // Attempt the new /generate direct endpoint first
+          res = await fetch(`${baseURL}/generate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
             body: JSON.stringify(payload)
           });
+          
+          if (!res.ok) {
+            // Fallback to Gradio array style if /generate fails
+            console.warn("/generate failed, falling back to Gradio API...");
+            const gradioPayload = {
+              data: [
+                payload.text,
+                payload.control_instruction,
+                payload.ref_wav,
+                payload.use_prompt_text,
+                payload.prompt_text_value,
+                payload.cfg_value,
+                payload.do_normalize,
+                payload.denoise,
+                payload.dit_steps
+              ]
+            };
+            
+            const startRes = await fetch(`${baseURL}/gradio_api/call/generate`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+              body: JSON.stringify(gradioPayload)
+            });
+            
+            if (!startRes.ok) throw new Error(`VoxCPM Gradio start failed: ${startRes.status}`);
+            
+            const startData = await startRes.json();
+            const eventId = startData.event_id;
+            
+            // Poll for result
+            const resultRes = await fetch(`${baseURL}/gradio_api/call/generate/${eventId}`, {
+              headers: { 'ngrok-skip-browser-warning': 'true' }
+            });
+            
+            if (!resultRes.ok) throw new Error("Gradio result fetch failed");
+            
+            const resultText = await resultRes.text();
+            const match = resultText.match(/data:\s*(\[.*\])/s);
+            if (!match) throw new Error("No data in Gradio response");
+            
+            const parsed = JSON.parse(match[1]);
+            const audioPath = parsed?.[0]?.url || parsed?.[0]?.path;
+            if (!audioPath) throw new Error("No audio path in Gradio result");
+            
+            const audioUrl = audioPath.startsWith('http') ? audioPath : `${baseURL}${audioPath}`;
+            const finalAudioRes = await fetch(audioUrl, { headers: { 'ngrok-skip-browser-warning': 'true' } });
+            return await finalAudioRes.blob();
+          }
+
+          const blob = await res.blob();
+          return blob;
         } catch (err: any) {
           if (err.name === 'TypeError' && err.message.includes('Failed to fetch')) {
-            throw new Error(`Failed to connect to VoxCPM at ${baseURL}. If you are seeing a "Failed to fetch" or "Mixed Content" error, it's because this app is served over HTTPS but your VoxCPM server is HTTP. Please use ngrok (e.g. \`ngrok http 8808\`) to get an HTTPS URL for your local server, or allow insecure content in your browser settings.`);
+            throw new Error(`Failed to connect to VoxCPM at ${baseURL}. Ensure ngrok is running and HTTPS is used.`);
           }
           throw err;
         }
-
-        if (!startRes.ok) {
-          throw new Error(`VoxCPM start error: ${startRes.status} - ${await startRes.text()}`);
-        }
-
-        const startData = await startRes.json();
-        const eventId = startData.event_id;
-
-        const resultRes = await fetch(
-          `${baseURL}/gradio_api/call/generate/${eventId}`,
-          {
-            headers: {
-              'ngrok-skip-browser-warning': 'true'
-            }
-          }
-        );
-
-        if (!resultRes.ok) {
-          throw new Error(`VoxCPM result error: ${resultRes.status} - ${await resultRes.text()}`);
-        }
-
-        const resultText = await resultRes.text();
-
-        const match = resultText.match(/data:\s*(\[.*\])/s);
-        if (!match) {
-          throw new Error(`VoxCPM returned no audio: ${resultText}`);
-        }
-
-        const parsed = JSON.parse(match[1]);
-        const audioPath = parsed?.[0]?.url || parsed?.[0]?.path;
-
-        if (!audioPath) {
-          throw new Error(`VoxCPM audio URL not found: ${resultText}`);
-        }
-
-        const audioUrl = audioPath.startsWith('http')
-          ? audioPath
-          : `${baseURL}${audioPath}`;
-
-        const audioRes = await fetch(audioUrl, {
-          headers: {
-            'ngrok-skip-browser-warning': 'true'
-          }
-        });
-        const blob = await audioRes.blob();
-
-        return blob;
       }
 
       if (engineToUse === 'google-free') {
@@ -2192,7 +2456,7 @@ export default function App() {
   };
 
   const handleVoiceChange = (id: number, voice: string) => {
-    updateSubtitles((prev) => prev.map((s) => (s.id === id ? { ...s, voice, audioUrl: undefined, waveform: undefined } : s)));
+    updateSubtitles((prev) => prev.map((s) => (s.id === id ? { ...s, voice, audioUrl: undefined, waveformPeaks: undefined } : s)));
   };
 
   const handleDragPointerDown = useCallback((
@@ -2209,77 +2473,113 @@ export default function App() {
     const target = e.currentTarget as HTMLElement;
     target.setPointerCapture(e.pointerId);
     
+    const initialAudioDuration = sub.audioDuration ?? (sub.endTime - sub.startTime);
+    const initialAudioTrimStart = sub.audioTrimStart ?? 0;
+    const initialAudioTrimEnd = sub.audioTrimEnd ?? initialAudioDuration;
+    const initialAudioStartTime = sub.audioStartTime ?? sub.startTime;
+
     dragInfoRef.current = {
       id: subId,
       type,
       startX: e.clientX,
       initialTime: sub.startTime,
       initialEndTime: sub.endTime,
-      initialAudioStartTime: sub.audioStartTime ?? sub.startTime,
-      initialAudioTrimStart: sub.audioTrimStart ?? 0,
-      initialAudioTrimEnd: sub.audioTrimEnd ?? sub.audioDuration ?? (sub.endTime - sub.startTime),
-      initialAudioDuration: sub.audioDuration ?? (sub.endTime - sub.startTime),
+      initialAudioStartTime,
+      initialAudioTrimStart,
+      initialAudioTrimEnd,
+      initialAudioDuration,
       element: target,
       isLinked: sub.isLinked ?? true,
       rafId: null,
       lastDx: 0
     };
+
+    setDragVisuals({
+      id: subId,
+      type,
+      startTime: sub.startTime,
+      endTime: sub.endTime,
+      audioStartTime: initialAudioStartTime,
+      audioTrimStart: initialAudioTrimStart,
+      audioTrimEnd: initialAudioTrimEnd
+    });
   }, [subtitles]);
 
   const handleDragPointerMove = useCallback((e: React.PointerEvent) => {
     const drag = dragInfoRef.current;
-    if (!drag || !drag.element) return;
+    if (!drag) return;
     
-    // Prevent default scrolling during drag
-    e.preventDefault();
-
     const dx = e.clientX - drag.startX;
     if (Math.abs(dx - drag.lastDx) < 0.2) return; 
     drag.lastDx = dx;
     
     if (drag.rafId === null) {
       drag.rafId = requestAnimationFrame(() => {
-        if (!dragInfoRef.current || !drag.element) return;
         const currentDrag = dragInfoRef.current;
+        if (!currentDrag) return;
+        
         const currentDx = currentDrag.lastDx;
-        const currentTimeDiff = currentDx / zoomLevel;
-
+        const deltaTime = zoomLevel > 0 ? currentDx / zoomLevel : 0;
+        
         // Snapping Logic
-        const snapThreshold = 10 / zoomLevel; // 10px snapping
-        let finalDx = currentDx;
-
+        const snapThreshold = 10 / zoomLevel; 
         const findSnap = (targetTime: number) => {
-          // Snap to playhead
           if (Math.abs(targetTime - timelineCurrentTime) < snapThreshold) {
-            return (timelineCurrentTime - (targetTime - currentTimeDiff)) * zoomLevel;
+            return timelineCurrentTime - targetTime;
           }
-          // Snap to other clip edges
           for (const s of subtitles) {
             if (s.id === currentDrag.id) continue;
-            if (Math.abs(targetTime - s.startTime) < snapThreshold) return (s.startTime - (targetTime - currentTimeDiff)) * zoomLevel;
-            if (Math.abs(targetTime - s.endTime) < snapThreshold) return (s.endTime - (targetTime - currentTimeDiff)) * zoomLevel;
+            if (Math.abs(targetTime - s.startTime) < snapThreshold) return s.startTime - targetTime;
+            if (Math.abs(targetTime - s.endTime) < snapThreshold) return s.endTime - targetTime;
           }
-          return currentDx;
+          return 0;
         };
 
-        if (currentDrag.type === 'text') {
-          finalDx = findSnap(currentDrag.initialTime + currentTimeDiff);
-          drag.element.style.transform = `translateX(${finalDx}px)`;
-        } else if (currentDrag.type === 'audio') {
-          finalDx = findSnap(currentDrag.initialAudioStartTime + currentTimeDiff);
-          drag.element.style.transform = `translateX(${finalDx}px)`;
-        } else if (currentDrag.type === 'trim-audio-start' || currentDrag.type === 'trim-text-start') {
-          // Visual resize from left
-          const boundedDx = Math.max(-currentDrag.initialTime * zoomLevel, Math.min(currentDrag.initialEndTime * zoomLevel - currentDrag.initialTime * zoomLevel - 2, currentDx));
-          drag.element.style.transform = `translateX(${boundedDx}px)`;
-          drag.element.style.width = `${(currentDrag.initialEndTime - currentDrag.initialTime) * zoomLevel - boundedDx}px`;
-        } else if (currentDrag.type === 'trim-audio-end' || currentDrag.type === 'trim-text-end') {
-          // Visual resize from right
-          const boundedDx = Math.max(-(currentDrag.initialEndTime - currentDrag.initialTime) * zoomLevel + 2, currentDx);
-          drag.element.style.width = `${(currentDrag.initialEndTime - currentDrag.initialTime) * zoomLevel + boundedDx}px`;
-        }
+        const snappedDeltaTime = deltaTime + findSnap(
+          currentDrag.type === 'text' ? currentDrag.initialTime + deltaTime :
+          currentDrag.type === 'audio' ? currentDrag.initialAudioStartTime + deltaTime :
+          0
+        );
 
-        drag.rafId = null;
+        setDragVisuals(prev => {
+          if (!prev || prev.id !== currentDrag.id) return prev;
+          const next = { ...prev };
+          const dt = snappedDeltaTime;
+          const isLinked = currentDrag.isLinked;
+          const MIN_DUR = 0.1;
+
+          if (currentDrag.type === 'text') {
+            const duration = currentDrag.initialEndTime - currentDrag.initialTime;
+            next.startTime = Math.max(0, currentDrag.initialTime + dt);
+            next.endTime = next.startTime + duration;
+            if (isLinked) next.audioStartTime = next.startTime;
+          } else if (currentDrag.type === 'audio') {
+            next.audioStartTime = Math.max(0, currentDrag.initialAudioStartTime + dt);
+            if (isLinked) {
+              const duration = currentDrag.initialEndTime - currentDrag.initialTime;
+              next.startTime = next.audioStartTime;
+              next.endTime = next.startTime + duration;
+            }
+          } else if (currentDrag.type === 'trim-text-start') {
+            next.startTime = Math.max(0, Math.min(currentDrag.initialEndTime - MIN_DUR, currentDrag.initialTime + dt));
+            if (isLinked) next.audioStartTime = next.startTime;
+          } else if (currentDrag.type === 'trim-text-end') {
+            next.endTime = Math.max(currentDrag.initialTime + MIN_DUR, currentDrag.initialEndTime + dt);
+          } else if (currentDrag.type === 'trim-audio-start') {
+            const maxTrimStart = currentDrag.initialAudioTrimEnd - MIN_DUR;
+            next.audioTrimStart = Math.max(0, Math.min(maxTrimStart, currentDrag.initialAudioTrimStart + dt));
+            const actualDelta = next.audioTrimStart - currentDrag.initialAudioTrimStart;
+            next.audioStartTime = Math.max(0, currentDrag.initialAudioStartTime + actualDelta);
+            if (isLinked) next.startTime = next.audioStartTime;
+          } else if (currentDrag.type === 'trim-audio-end') {
+            const minTrimEnd = currentDrag.initialAudioTrimStart + MIN_DUR;
+            next.audioTrimEnd = Math.max(minTrimEnd, Math.min(currentDrag.initialAudioDuration, currentDrag.initialAudioTrimEnd + dt));
+            if (isLinked) next.endTime = next.audioStartTime + (next.audioTrimEnd - next.audioTrimStart);
+          }
+          return next;
+        });
+
+        currentDrag.rafId = null;
       });
     }
   }, [zoomLevel, timelineCurrentTime, subtitles]);
@@ -2288,62 +2588,37 @@ export default function App() {
     const drag = dragInfoRef.current;
     if (!drag) return;
     
-    if (drag.rafId) {
-      cancelAnimationFrame(drag.rafId);
-    }
+    if (drag.rafId) cancelAnimationFrame(drag.rafId);
     
     const target = e.currentTarget as HTMLElement;
     target.releasePointerCapture(e.pointerId);
     
-    const dx = e.clientX - drag.startX;
-    const deltaTime = zoomLevel > 0 ? dx / zoomLevel : 0;
-    
-    if (Math.abs(deltaTime) > 0.001 || drag.type.startsWith('trim')) {
-      updateSubtitles((prev) => prev.map(s => {
+    setDragVisuals(finalVisuals => {
+      if (finalVisuals && finalVisuals.id === drag.id) {
+        console.log(`[Timeline] Commit ${drag.type} for clip ${drag.id}.`);
+        if (drag.type === 'audio' || drag.type === 'text') {
+           console.log("drag clip", drag.id, "final startTime:", finalVisuals.startTime);
+        } else if (drag.type.startsWith('trim')) {
+           console.log("trim clip", drag.id, "trimStart:", finalVisuals.audioTrimStart, "trimEnd:", finalVisuals.audioTrimEnd);
+        }
+
+        updateSubtitles(prev => prev.map(s => {
           if (s.id !== drag.id) return s;
-          
-          const isLinked = drag.isLinked;
-          let nextSub = { ...s };
-          
-          if (drag.type === 'text') {
-              const duration = drag.initialEndTime - drag.initialTime;
-              nextSub.startTime = Math.max(0, drag.initialTime + deltaTime);
-              nextSub.endTime = nextSub.startTime + duration;
-              if (isLinked) {
-                  nextSub.audioStartTime = nextSub.startTime;
-              }
-          } else if (drag.type === 'audio') {
-              nextSub.audioStartTime = Math.max(0, drag.initialAudioStartTime + deltaTime);
-              if (isLinked) {
-                  const duration = drag.initialEndTime - drag.initialTime;
-                  nextSub.startTime = nextSub.audioStartTime;
-                  nextSub.endTime = nextSub.startTime + duration;
-              }
-          } else if (drag.type === 'trim-text-start') {
-              nextSub.startTime = Math.max(0, Math.min(drag.initialEndTime - 0.1, drag.initialTime + deltaTime));
-              if (isLinked) nextSub.audioStartTime = nextSub.startTime;
-          } else if (drag.type === 'trim-text-end') {
-              nextSub.endTime = Math.max(drag.initialTime + 0.1, drag.initialEndTime + deltaTime);
-          } else if (drag.type === 'trim-audio-start') {
-              nextSub.audioTrimStart = Math.max(0, Math.min(drag.initialAudioTrimEnd - 0.1, drag.initialAudioTrimStart + deltaTime));
-              const actualDelta = nextSub.audioTrimStart - drag.initialAudioTrimStart;
-              nextSub.audioStartTime = drag.initialAudioStartTime + actualDelta;
-              if (isLinked) nextSub.startTime = nextSub.audioStartTime;
-          } else if (drag.type === 'trim-audio-end') {
-              nextSub.audioTrimEnd = Math.max(drag.initialAudioTrimStart + 0.1, Math.min(drag.initialAudioDuration, drag.initialAudioTrimEnd + deltaTime));
-              if (isLinked) nextSub.endTime = nextSub.audioStartTime + (nextSub.audioTrimEnd - nextSub.audioTrimStart);
-          }
-          
-          return nextSub;
-      }));
-    }
-    
-    if (drag.element) {
-      drag.element.style.transform = '';
-      drag.element.style.width = '';
-    }
+          return {
+            ...s,
+            startTime: finalVisuals.startTime,
+            endTime: finalVisuals.endTime,
+            audioStartTime: finalVisuals.audioStartTime,
+            audioTrimStart: finalVisuals.audioTrimStart,
+            audioTrimEnd: finalVisuals.audioTrimEnd
+          };
+        }));
+      }
+      return null;
+    });
+
     dragInfoRef.current = null;
-  }, [zoomLevel, updateSubtitles]);
+  }, [updateSubtitles]);
 
   const handleToggleLink = (id: number) => {
     updateSubtitles(prev => prev.map(s => {
@@ -2360,7 +2635,7 @@ export default function App() {
   };
 
   const handleEngineChange = (id: number, engine: string) => {
-    updateSubtitles((prev) => prev.map((s) => (s.id === id ? { ...s, engine, voice: 'default', audioUrl: undefined, waveform: undefined } : s)));
+    updateSubtitles((prev) => prev.map((s) => (s.id === id ? { ...s, engine, voice: 'default', audioUrl: undefined, waveformPeaks: undefined } : s)));
   };
 
   const handlePreviewAudio = (e: React.MouseEvent, sub: Subtitle) => {
@@ -2396,11 +2671,11 @@ export default function App() {
     const blob = await generateSubtitleAudio(sub);
     let url = "";
     let duration = 0;
-    let waveform: number[] | undefined;
+    let waveformPeaks: number[] | undefined;
     if (blob) {
       url = createTrackedUrl(blob);
       duration = await getAudioDuration(url);
-      waveform = await generateWaveform(url);
+      waveformPeaks = await generateWaveform(url);
     }
     updateSubtitles((prev) =>
       prev.map((s) => (s.id === sub.id ? { 
@@ -2409,9 +2684,11 @@ export default function App() {
         audioUrl: url || undefined, 
         audioBlob: blob || undefined,
         audioDuration: duration || undefined, 
-        waveform,
+        waveformPeaks,
+        audioBufferId: url || undefined,
         audioTrimStart: 0,
-        audioTrimEnd: duration || undefined
+        audioTrimEnd: duration || undefined,
+        audioStartTime: s.startTime
       } : s))
     );
     if (url) {
@@ -2442,11 +2719,11 @@ export default function App() {
       const blob = await generateSubtitleAudio(subtitles[i]);
       let url = "";
       let duration = 0;
-      let waveform: number[] | undefined;
+      let waveformPeaks: number[] | undefined;
       if (blob) {
         url = createTrackedUrl(blob);
         duration = await getAudioDuration(url);
-        waveform = await generateWaveform(url);
+        waveformPeaks = await generateWaveform(url);
       }
       
       // Update with result
@@ -2458,9 +2735,11 @@ export default function App() {
             audioUrl: url || undefined, 
             audioBlob: blob || undefined,
             audioDuration: duration || undefined, 
-            waveform,
+            waveformPeaks,
+            audioBufferId: url || undefined,
             audioTrimStart: 0,
-            audioTrimEnd: duration || undefined
+            audioTrimEnd: duration || undefined,
+            audioStartTime: s.startTime
           } : s
         )
       );
@@ -2633,7 +2912,7 @@ export default function App() {
     setErrorMsg(null);
 
     try {
-      const maxEndTime = Math.max(...audioClips.map(c => c.endTime));
+      const maxEndTime = audioClips.reduce((max, c) => c.endTime > max ? c.endTime : max, 0);
       const totalDuration = maxEndTime + 1;
       
       const OfflineCtxClass = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
@@ -2753,7 +3032,7 @@ export default function App() {
     return url;
   };
 
-  // Clean up ALL object URLs on unmount
+  // 1. Manage Event Listeners
   useEffect(() => {
     const handleResetTrimEvent = (e: any) => {
       const { id, type } = e.detail;
@@ -2774,9 +3053,15 @@ export default function App() {
     };
 
     window.addEventListener('reset-trim', handleResetTrimEvent);
-
     return () => {
       window.removeEventListener('reset-trim', handleResetTrimEvent);
+    };
+  }, [updateSubtitles]);
+
+  // 2. Cleanup ALL object URLs ONLY on unmount
+  useEffect(() => {
+    return () => {
+      console.log("Cleaning up all object URLs on unmount...");
       allObjectUrlsRef.current.forEach(url => {
         try {
           URL.revokeObjectURL(url);
@@ -2784,10 +3069,12 @@ export default function App() {
           // Ignore errors during cleanup
         }
       });
+      allObjectUrlsRef.current.clear();
     };
-  }, [updateSubtitles]);
+  }, []);
 
   return (
+    <ErrorBoundary>
     <div className="w-full h-screen bg-[#020617] text-slate-200 font-sans overflow-hidden flex flex-col">
       <DebugOverlay 
         selectedClipId={selectedClipId} 
@@ -2952,11 +3239,11 @@ export default function App() {
               <div className="relative border border-dashed border-slate-700 hover:border-amber-500 hover:bg-slate-800/50 transition-colors rounded p-4 flex flex-col items-center justify-center group cursor-pointer h-24">
                 <Film className="w-5 h-5 text-slate-500 mb-2 group-hover:text-amber-400" />
                 <span className="text-xs font-medium text-slate-400 group-hover:text-slate-200 text-center">
-                  {videoFile ? videoFile.name : 'Upload MP4/WebM'}
+                  {videoFile ? videoFile.name : 'Upload Video (MP4/WebM/MKV)'}
                 </span>
                 <input 
                   type="file" 
-                  accept="video/mp4,video/webm" 
+                  accept="video/mp4,video/webm,video/x-matroska,.mkv" 
                   onChange={handleVideoUpload}
                   className="absolute inset-0 opacity-0 cursor-pointer"
                 />
@@ -3067,7 +3354,8 @@ export default function App() {
             <SpeakerManager 
               speakers={speakers} 
               updateSpeaker={updateSpeaker} 
-              onAutoDetect={handleAutoDetectSpeakers} 
+              onAutoDetect={handleAutoDetectSpeakers}
+              applySpeakerToAll={applySpeakerToAll}
               subtitles={subtitles}
               ttsEngine={ttsEngine}
               defaultGeminiVoice={defaultGeminiVoice}
@@ -3120,14 +3408,112 @@ export default function App() {
           <div className="flex-1 flex flex-col items-center justify-center p-4 md:p-8 relative overflow-y-auto">
             <div className="w-full max-w-4xl aspect-video bg-slate-900 rounded-lg shadow-2xl relative overflow-hidden ring-1 ring-slate-800 flex items-center justify-center shrink-0">
               {videoUrl ? (
-                <video 
-                  ref={videoRef}
-                  src={videoUrl} 
-                  controls 
-                  crossOrigin="anonymous"
-                  onLoadedMetadata={(e) => setVideoDuration(e.currentTarget.duration || 0)}
-                  className="w-full h-full bg-black"
-                />
+                <>
+                  <video 
+                    key={videoUrl}
+                    ref={videoRef}
+                    src={videoUrl}
+                    controls 
+                    preload="metadata"
+                    onLoadedMetadata={(e) => {
+                      const v = e.currentTarget;
+                      console.log("Video Metadata Loaded:", {
+                        duration: v.duration,
+                        videoWidth: v.videoWidth,
+                        videoHeight: v.videoHeight,
+                        readyState: v.readyState,
+                        networkState: v.networkState
+                      });
+                      setVideoDuration(v.duration || 0);
+                    }}
+                    onLoadStart={() => console.log("Video Load Start")}
+                    onCanPlay={() => console.log("Video Can Play")}
+                    onWaiting={() => console.log("Video Waiting (Buffering...)")}
+                    onError={(e) => {
+                      const target = e.target as HTMLVideoElement;
+                      const err = target.error;
+                      console.error("Video Playback Error Detail:", {
+                        code: err?.code,
+                        message: err?.message,
+                        src: target.src,
+                        currentSrc: target.currentSrc,
+                        readyState: target.readyState,
+                        networkState: target.networkState
+                      });
+                      // If there's an error and it's a format issue
+                      if (err) {
+                        setShowMKVWarning(true);
+                      }
+                    }}
+                    className="w-full h-full bg-black"
+                  />
+
+                  {showMKVWarning && (
+                    <div className="absolute inset-0 z-20 bg-slate-900/95 flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-300 backdrop-blur-sm">
+                      <div className="bg-amber-500/10 p-4 rounded-full mb-4">
+                        <AlertTriangle className="w-10 h-10 text-amber-500" />
+                      </div>
+                      <h3 className="text-lg font-bold text-white mb-2">បញ្ហានៃការចាក់វីដេអូ (Playback Error)</h3>
+                      <p className="text-sm text-slate-400 mb-6 max-w-sm leading-relaxed">
+                        វីដេអូនេះប្រហែលជាមិនត្រូវបានគាំទ្រដោយកម្មវិធីរុករកទេ។ ចុច "Optimize" ដើម្បីបំលែងវាទៅជា MP4 ។<br/>
+                        <span className="text-[11px] opacity-70">(Your browser may not support this video format. Click "Optimize" to prepare it for smooth playback.)</span>
+                      </p>
+                      
+                      <div className="flex flex-col gap-3 w-full max-w-xs">
+                        <button 
+                          onClick={handleOptimizeMKV}
+                          disabled={isTranscodingVideo}
+                          className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 px-6 rounded-lg transition-all flex items-center justify-center gap-2 group shadow-lg shadow-amber-500/20 disabled:opacity-50"
+                        >
+                          {isTranscodingVideo ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Optimizing Video...
+                            </>
+                          ) : (
+                            <>
+                              <Play className="w-4 h-4 group-hover:scale-110 transition shrink-0" />
+                              Optimize for Playback
+                            </>
+                          )}
+                        </button>
+
+                        <button 
+                          onClick={() => {
+                            if (videoFile) {
+                              const oldUrl = videoUrl;
+                              setVideoUrl('');
+                              setTimeout(() => {
+                                if (oldUrl) {
+                                  URL.revokeObjectURL(oldUrl);
+                                  allObjectUrlsRef.current.delete(oldUrl);
+                                }
+                                setVideoUrl(createTrackedUrl(videoFile));
+                                setShowMKVWarning(false);
+                              }, 100);
+                            }
+                          }}
+                          className="w-full bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold py-2 px-6 rounded-lg border border-slate-700 transition"
+                        >
+                          Retry Loading
+                        </button>
+                        
+                        <button 
+                          onClick={() => setShowMKVWarning(false)}
+                          className="text-xs text-slate-500 hover:text-slate-300 underline py-2 hover:bg-white/5 rounded transition"
+                        >
+                          Ignore and try local player
+                        </button>
+                      </div>
+
+                      {isTranscodingVideo && (
+                        <div className="mt-8 w-64 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div className="h-full bg-amber-500 animate-[progress_10s_ease-in-out_infinite]" style={{ width: '40%' }}></div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               ) : (
                 <div className="absolute inset-0 flex items-center justify-center flex-col gap-4 bg-gradient-to-t from-slate-950/60 to-transparent text-slate-600">
                   <Play className="w-12 h-12 opacity-30" />
@@ -3457,28 +3843,24 @@ export default function App() {
                       </div>
                     </div>
                     <div className="relative flex-1 h-full">
-                      {visibleSubtitles.map((sub) => (
+                      {visibleSubtitles.map((sub) => {
+                        const isDragging = dragVisuals && dragVisuals.id === sub.id;
+                        const sTime = isDragging ? dragVisuals.startTime : sub.startTime;
+                        const eTime = isDragging ? dragVisuals.endTime : sub.endTime;
+
+                        return (
                                <TimelineClip 
                                   key={`sub-${sub.id}`}
                                   id={sub.id}
                                   type="subtitle"
-                                  startTime={sub.startTime}
-                                  endTime={sub.endTime}
+                                  startTime={sTime}
+                                  endTime={eTime}
                                   text={sub.text}
                                   zoomLevel={pixelsPerSecond}
-                                  isActive={timelineCurrentTime >= sub.startTime && timelineCurrentTime <= sub.endTime}
+                                  isActive={timelineCurrentTime >= sTime && timelineCurrentTime <= eTime}
                                   isSelected={selectedClipId?.id === sub.id && selectedClipId?.type === 'subtitle'}
                                   onSelect={() => {
                                     setSelectedClipId({ id: sub.id, type: 'subtitle' });
-                                    console.log({
-                                      timelineCurrentTime,
-                                      viewportStartTime,
-                                      pixelsPerSecond,
-                                      subtitleStart: sub.startTime,
-                                      subtitleEnd: sub.endTime,
-                                      playheadLeft: (timelineCurrentTime - viewportStartTime) * pixelsPerSecond,
-                                      clipLeft: (sub.startTime - viewportStartTime) * pixelsPerSecond
-                                    });
                                   }}
                                   onDragStart={handleDragPointerDown}
                                   onDragMove={handleDragPointerMove}
@@ -3486,7 +3868,8 @@ export default function App() {
                                   onAutoTrim={handleAutoTrim}
                                   emotions={sub.emotions}
                                 />
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -3504,22 +3887,29 @@ export default function App() {
                           const viewportEndTime = (timelineScrollLeft + timelineViewportWidth) / pixelsPerSecond;
                           const padding = 2;
                           return (clip.startTime <= viewportEndTime + padding) && (clip.endTime >= viewportStartTime - padding);
-                      }).map((clip) => (
+                      }).map((clip) => {
+                        const isDragging = dragVisuals && dragVisuals.id === clip.id;
+                        const sTime = isDragging ? dragVisuals.startTime : clip.startTime;
+                        const eTime = isDragging ? dragVisuals.endTime : clip.endTime;
+                        const tStart = isDragging ? dragVisuals.audioTrimStart : clip.audioTrimStart;
+                        const tEnd = isDragging ? dragVisuals.audioTrimEnd : clip.audioTrimEnd;
+
+                        return (
                         <TimelineClip 
                           key={`audio-${clip.id}`}
                           id={clip.id}
                           type="audio"
-                          startTime={clip.startTime}
-                          endTime={clip.endTime}
+                          startTime={sTime}
+                          endTime={eTime}
                           zoomLevel={zoomLevel}
                           audioUrl={clip.audioUrl}
-                          waveform={clip.waveform}
-                          audioTrimStart={clip.audioTrimStart}
-                          audioTrimEnd={clip.audioTrimEnd}
+                          waveformPeaks={clip.waveformPeaks}
+                          audioTrimStart={tStart}
+                          audioTrimEnd={tEnd}
                           audioDuration={clip.audioDuration}
                           engine={clip.engine}
                           voice={clip.voice}
-                          isActive={timelineCurrentTime >= clip.startTime && timelineCurrentTime < clip.endTime}
+                          isActive={timelineCurrentTime >= sTime && timelineCurrentTime < eTime}
                           isSelected={selectedClipId?.id === clip.id && selectedClipId?.type === 'audio'}
                           onSelect={() => setSelectedClipId({ id: clip.id, type: 'audio' })}
                           onDragStart={handleDragPointerDown}
@@ -3529,7 +3919,8 @@ export default function App() {
                           isOverlapping={audioOverlaps.has(clip.id)}
                           emotions={clip.emotions}
                         />
-                      ))}
+                      );
+                    })}
                     </div>
                   </div>
                 </div>
@@ -3563,7 +3954,7 @@ export default function App() {
              <div className="flex gap-2">
                <label className="flex-1 text-center py-2 px-4 bg-slate-800 border border-slate-700 rounded text-xs font-medium text-slate-300 cursor-pointer">
                  {videoFile ? 'Change Video' : 'Upload Video'}
-                 <input type="file" accept="video/mp4,video/webm" onChange={handleVideoUpload} className="hidden" />
+                 <input type="file" accept="video/mp4,video/webm,video/x-matroska,.mkv" onChange={handleVideoUpload} className="hidden" />
                </label>
                <label className="flex-1 text-center py-2 px-4 bg-slate-800 border border-slate-700 rounded text-xs font-medium text-slate-300 cursor-pointer">
                  {subtitles.length > 0 ? 'Change SRT' : 'Upload SRT'}
@@ -3822,7 +4213,7 @@ export default function App() {
                   />
                   <select 
                     value={defaultGeminiVoice} 
-                    onChange={(e) => setDefaultGeminiVoice(e.target.value)}
+                    onChange={(e) => setDefaultGeminiVoice(e.target.value as any)}
                     className="w-32 bg-slate-950 border border-slate-800 rounded-md px-2 py-2 text-sm text-white focus:outline-none focus:border-amber-500 transition-all"
                   >
                     {TTS_VOICES.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}
@@ -3868,6 +4259,7 @@ export default function App() {
         }
       `}</style>
     </div>
+    </ErrorBoundary>
   );
 }
 

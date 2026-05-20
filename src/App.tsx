@@ -713,18 +713,17 @@ const SubtitleListItem = React.memo(({
 
         <div className="flex items-center gap-2">
           <select
-            value={sub.engine || 'default'}
+            value={sub.engine || 'voxcpm'}
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => handleEngineChange(sub.id, e.target.value)}
           className="bg-slate-900 text-[10px] text-slate-400 border border-slate-700 rounded px-2 py-1 outline-none hover:border-slate-500/50 transition-colors"
         >
-          <option value="default">Global Engine</option>
-          <option value="gemini">Gemini</option>
           <option value="voxcpm">VoxCPM</option>
+          <option value="gemini">Gemini</option>
           <option value="google-free">Google Free</option>
         </select>
         {(() => {
-          const eng = (!sub.engine || sub.engine === 'default') ? ttsEngine : sub.engine;
+          const eng = (!sub.engine) ? 'voxcpm' : sub.engine;
           return eng === 'gemini' ? (
           <select 
             value={sub.voice} 
@@ -844,14 +843,13 @@ const SpeakerManager = ({ speakers, updateSpeaker, onAutoDetect, applySpeakerToA
                  <label className="text-[10px] text-slate-500 uppercase font-bold text-[9px]">Voice & Engine</label>
                  <div className="flex gap-1">
                    <select 
-                      value={speaker.engine}
+                      value={speaker.engine || 'voxcpm'}
                       onChange={(e) => updateSpeaker(speaker.id, { engine: e.target.value })}
                       className="flex-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-1 text-[11px] text-slate-200 outline-none focus:border-amber-500/50"
                    >
-                     <option value="default">Global Engine</option>
+                     <option value="voxcpm">VoxCPM</option>
                      <option value="google-free">Google Free</option>
                      <option value="gemini">Gemini</option>
-                     <option value="voxcpm">VoxCPM</option>
                    </select>
 
                    <input 
@@ -1021,7 +1019,7 @@ export default function App() {
   const activeAudioRefs = useRef<Map<number, HTMLAudioElement>>(new Map());
   const [videoVolume, setVideoVolume] = useState(0.1);
   const [dubVolume, setDubVolume] = useState(1.0);
-  const [ttsEngine, setTtsEngine] = useState<'gemini' | 'google-free' | 'voxcpm'>(() => (localStorage.getItem('tts_engine') as any) || 'google-free');
+  const [ttsEngine, setTtsEngine] = useState<'gemini' | 'google-free' | 'voxcpm'>(() => (localStorage.getItem('tts_engine') as any) || 'voxcpm');
   const [defaultGeminiVoice, setDefaultGeminiVoice] = useState<'Puck' | 'Charon' | 'Kore' | 'Fenrir' | 'Aoede'>(() => (localStorage.getItem('default_gemini_voice') as any) || 'Puck');
   const [defaultVoxCPMVoice, setDefaultVoxCPMVoice] = useState(() => localStorage.getItem('default_voxcpm_voice') || 'khmer-male-1');
   const [leftPanelTab, setLeftPanelTab] = useState<'files' | 'speakers'>('files');
@@ -1375,6 +1373,18 @@ export default function App() {
     const saved = localStorage.getItem('timeline_height');
     return saved ? parseInt(saved, 10) : 280;
   });
+  const [leftPanelWidth, setLeftPanelWidth] = useState(() => {
+    const saved = localStorage.getItem('left_panel_width');
+    return saved ? parseInt(saved, 10) : 320;
+  });
+  const [videoPanelWidth, setVideoPanelWidth] = useState(() => {
+    const saved = localStorage.getItem('video_panel_width');
+    return saved ? parseInt(saved, 10) : 288;
+  });
+  const [isResizingLeft, setIsResizingLeft] = useState(false);
+  const [isResizingVideo, setIsResizingVideo] = useState(false);
+  const liveLeftWidthRef = useRef(320);
+  const liveVideoWidthRef = useRef(288);
   const [followPlayhead, setFollowPlayhead] = useState(true);
   const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
@@ -1786,27 +1796,77 @@ export default function App() {
 
 
 
+  const liveTimelineHeightRef = useRef(timelineHeight);
+  useEffect(() => { liveTimelineHeightRef.current = timelineHeight; }, [timelineHeight]);
+  useEffect(() => { liveLeftWidthRef.current = leftPanelWidth; }, [leftPanelWidth]);
+  useEffect(() => { liveVideoWidthRef.current = videoPanelWidth; }, [videoPanelWidth]);
+
   useEffect(() => {
-    if (isResizingTimeline) {
-      const handleMouseMove = (e: MouseEvent) => {
-        const h = window.innerHeight - e.clientY;
-        const boundedH = Math.max(100, Math.min(h, window.innerHeight * 0.8));
-        setTimelineHeight(boundedH);
-      };
-      const handleMouseUp = () => {
-        setIsResizingTimeline(false);
-        localStorage.setItem('timeline_height', timelineHeight.toString());
-        document.body.style.cursor = 'default';
-      };
-      document.body.style.cursor = 'row-resize';
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
-      return () => {
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
-      };
-    }
-  }, [isResizingTimeline, timelineHeight]);
+    if (!isResizingLeft) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const w = Math.max(200, Math.min(e.clientX, 520));
+      setLeftPanelWidth(w);
+    };
+    const handleMouseUp = () => {
+      setIsResizingLeft(false);
+      localStorage.setItem('left_panel_width', liveLeftWidthRef.current.toString());
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingLeft]);
+
+  useEffect(() => {
+    if (!isResizingVideo) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const w = Math.max(200, Math.min(window.innerWidth - e.clientX, 520));
+      setVideoPanelWidth(w);
+    };
+    const handleMouseUp = () => {
+      setIsResizingVideo(false);
+      localStorage.setItem('video_panel_width', liveVideoWidthRef.current.toString());
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingVideo]);
+
+  useEffect(() => {
+    if (!isResizingTimeline) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const h = window.innerHeight - e.clientY;
+      const boundedH = Math.max(120, Math.min(h, window.innerHeight * 0.75));
+      setTimelineHeight(boundedH);
+    };
+    const handleMouseUp = () => {
+      setIsResizingTimeline(false);
+      localStorage.setItem('timeline_height', liveTimelineHeightRef.current.toString());
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingTimeline]);
 
 
 
@@ -3209,9 +3269,20 @@ export default function App() {
       </header>
 
       {/* Main Workspace */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-col flex-1 overflow-hidden">
+        {/* Panels Row */}
+        <div className="flex flex-1 overflow-hidden min-h-0">
         {/* Left Panel: Upload Controls & Speakers */}
-        <aside className="w-80 border-r border-slate-800 flex flex-col bg-[#020617] hidden md:flex shrink-0">
+        <aside className="border-r border-slate-800 flex flex-col bg-[#020617] hidden md:flex shrink-0 relative" style={{width: leftPanelWidth + 'px'}}>
+          {/* Left panel resize handle */}
+          <div
+            className={`absolute top-0 right-0 bottom-0 w-3 cursor-col-resize z-50 flex items-center justify-center group transition-colors ${isResizingLeft ? 'bg-amber-500/20' : 'hover:bg-amber-500/10'}`}
+            onMouseDown={(e) => { e.preventDefault(); setIsResizingLeft(true); }}
+          >
+            <div className={`flex flex-col gap-[3px] items-center transition-opacity ${isResizingLeft ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+              {[0,1,2,3,4].map(i => <div key={i} className={`h-5 w-[2px] rounded-full ${isResizingLeft ? 'bg-amber-400' : 'bg-slate-500 group-hover:bg-amber-500/70'}`} />)}
+            </div>
+          </div>
           <div className="flex border-b border-slate-800 h-11 shrink-0">
             <button 
               onClick={() => setLeftPanelTab('files')}
@@ -3403,10 +3474,177 @@ export default function App() {
           </div>
         </aside>
 
-        {/* Center: Video Player Area */}
-        <main className="flex-1 bg-black/40 flex flex-col relative overflow-hidden">
-          <div className="flex-1 flex flex-col items-center justify-center p-4 md:p-8 relative overflow-y-auto">
-            <div className="w-full max-w-4xl aspect-video bg-slate-900 rounded-lg shadow-2xl relative overflow-hidden ring-1 ring-slate-800 flex items-center justify-center shrink-0">
+        {/* Right Panel: Subtitle List */}
+        <aside className="flex-1 border-r border-slate-800 bg-slate-900/30 flex flex-col min-w-0 overflow-hidden">
+          <div className="p-4 border-b border-slate-800 flex items-center justify-between shrink-0">
+            <h3 className="text-xs font-bold text-slate-500 uppercase">អត្ថបទ SRT (Subtitles)</h3>
+            <div className="flex gap-2">
+              <button 
+                onClick={() => setIsBatchEditMode(!isBatchEditMode)}
+                className={`p-1.5 rounded transition ${isBatchEditMode ? 'bg-amber-500/20 text-amber-500' : 'hover:bg-slate-800 text-slate-500 hover:text-slate-300'}`}
+                title="Batch Edit"
+              >
+                <ListChecks className="w-4 h-4" />
+              </button>
+              <button className="p-1 hover:bg-slate-800 rounded">
+                 <Music className="w-4 h-4 text-slate-500" />
+              </button>
+            </div>
+          </div>
+          
+          {isBatchEditMode && (
+            <div className="p-3 border-b border-slate-800 bg-slate-800/20 text-xs flex flex-col gap-3 shrink-0">
+              <div className="flex items-center justify-between">
+                <div className="flex gap-3 items-center">
+                  <button 
+                    onClick={handleSelectAll}
+                    className="text-amber-500 hover:text-amber-400 capitalize underline"
+                  >
+                    Select All
+                  </button>
+                  <span className="text-slate-500">|</span>
+                  <button 
+                    onClick={handleDeselectAll}
+                    className="text-slate-400 hover:text-slate-300 capitalize underline"
+                  >
+                    None
+                  </button>
+                </div>
+                <span className="text-slate-400">{selectedSubtitles.size} selected</span>
+              </div>
+              <div className="flex flex-col gap-2">
+                <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Find & Replace</div>
+                <input 
+                  type="text" 
+                  placeholder="Find text..." 
+                  value={batchFindText}
+                  onChange={(e) => setBatchFindText(e.target.value)}
+                  className="bg-slate-900 border border-slate-700 rounded px-2 py-1.5 outline-none text-slate-200"
+                />
+                <div className="flex gap-2">
+                  <input 
+                    type="text" 
+                    placeholder="Replace with..." 
+                    value={batchReplaceText}
+                    onChange={(e) => setBatchReplaceText(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 outline-none text-slate-200"
+                  />
+                  <button 
+                    onClick={handleBatchReplace}
+                    className="bg-amber-500 hover:bg-amber-400 text-slate-900 px-3 rounded font-bold whitespace-nowrap transition-colors"
+                  >
+                    Replace
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-col gap-2">
+                 <div className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Adjust Timing</div>
+                 <div className="flex gap-2 items-center">
+                   <input 
+                     type="number"
+                     step="0.1"
+                     value={batchTimeShift}
+                     onChange={(e) => setBatchTimeShift(e.target.value)}
+                     className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 outline-none text-slate-200"
+                     placeholder="Shift seconds (e.g. 1.5, -2)"
+                   />
+                   <button 
+                     onClick={handleBatchTimeShift}
+                     className="bg-purple-600 hover:bg-purple-500 text-white px-3 py-1.5 rounded font-bold whitespace-nowrap transition-colors"
+                   >
+                     Shift Time
+                   </button>
+                 </div>
+              </div>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="p-3.5 m-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-[11px] font-medium animate-in fade-in slide-in-from-top-2 duration-300 relative group pr-10 shadow-lg shadow-red-950/20">
+              <div className="flex items-start gap-3.5">
+                <div className="mt-0.5 shrink-0 p-1.5 bg-red-500/10 rounded-lg border border-red-500/20">
+                  <X className="w-3 h-3 text-red-400/80" />
+                </div>
+                <div className="flex flex-col gap-1.5 flex-1 pr-2">
+                  <span className="font-bold flex items-center gap-2 text-red-300">
+                    <span className="w-1 h-1 rounded-full bg-red-500" />
+                    TTS Generation Issue
+                  </span>
+                  <span className="opacity-80 leading-relaxed break-words">{errorMsg}</span>
+                  <div className="mt-1 flex items-center gap-3">
+                    <button 
+                      onClick={() => setErrorMsg('')}
+                      className="text-[10px] font-bold text-red-400/60 hover:text-red-400 underline underline-offset-2 transition-colors uppercase tracking-wider"
+                    >
+                      Dismiss
+                    </button>
+                    {(errorMsg.includes('API Key') || errorMsg.includes('Settings')) && (
+                      <span className="text-[9px] text-slate-500 italic">Hint: Go to Settings tab above</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <button 
+                onClick={() => setErrorMsg('')}
+                className="absolute top-3 right-3 p-1 rounded-md bg-transparent opacity-40 group-hover:opacity-100 transition-all hover:bg-red-500/20"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto custom-scrollbar">
+            {subtitles.length > 0 ? (
+               <div className="flex flex-col">
+                 {subtitles.map((sub) => (
+                    <SubtitleListItem 
+                      key={sub.id}
+                      sub={sub}
+                      isActive={activeSub?.id === sub.id}
+                      isBatchEditMode={isBatchEditMode}
+                      selectedSubtitles={selectedSubtitles}
+                      previewingId={previewingId}
+                      isGeneratingAll={isGeneratingAll}
+                      ttsEngine={ttsEngine}
+                      defaultVoxCPMVoice={defaultVoxCPMVoice}
+                      referenceAudioFile={referenceAudioFile}
+                      referenceAudioBase64={referenceAudioBase64}
+                      handleToggleLink={handleToggleLink}
+                      toggleSubtitleSelection={toggleSubtitleSelection}
+                      handlePreviewAudio={handlePreviewAudio}
+                      handleGenerateSingle={handleGenerateSingle}
+                      handleEngineChange={handleEngineChange}
+                      handleVoiceChange={handleVoiceChange}
+                      handleSubReferenceAudioUpload={handleSubReferenceAudioUpload}
+                      playAudioFile={playAudioFile}
+                      updateSubtitles={updateSubtitles}
+                      videoRef={videoRef}
+                    />
+                  ))}
+               </div>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-center text-slate-600 p-4">
+                <FileText className="w-10 h-10 mb-3 opacity-20" />
+                <p className="text-sm">Upload an SRT file to load subtitles and generate dramatic Khmer audio.</p>
+              </div>
+            )}
+          </div>
+        </aside>
+
+        {/* Center: Video Player Area — portrait 9:16 */}
+        <main className="bg-black/40 flex flex-col relative overflow-hidden shrink-0 border-l border-slate-800" style={{width: videoPanelWidth + 'px'}}>
+          {/* Video panel resize handle */}
+          <div
+            className={`absolute top-0 left-0 bottom-0 w-3 cursor-col-resize z-50 flex items-center justify-center group transition-colors ${isResizingVideo ? 'bg-amber-500/20' : 'hover:bg-amber-500/10'}`}
+            onMouseDown={(e) => { e.preventDefault(); setIsResizingVideo(true); }}
+          >
+            <div className={`flex flex-col gap-[3px] items-center transition-opacity ${isResizingVideo ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+              {[0,1,2,3,4].map(i => <div key={i} className={`h-5 w-[2px] rounded-full ${isResizingVideo ? 'bg-amber-400' : 'bg-slate-500 group-hover:bg-amber-500/70'}`} />)}
+            </div>
+          </div>
+          <div className="flex-1 flex flex-col items-center justify-center p-3 relative overflow-y-auto">
+            <div className="w-full bg-slate-900 rounded-lg shadow-2xl relative overflow-hidden ring-1 ring-slate-800 flex items-center justify-center shrink-0" style={{aspectRatio:'9/16', maxHeight:'calc(100vh - 14rem)'}}>
               {videoUrl ? (
                 <>
                   <video 
@@ -3575,154 +3813,157 @@ export default function App() {
               return null;
             })()}
           </div>
-          
-          {/* Audio Timeline Panel */}
+        </main>
+        </div>{/* end Panels Row */}
+
+          {/* Audio Timeline Panel — full width under all panels */}
           <div 
             className="shrink-0 border-t border-slate-800 bg-slate-950 flex flex-col overflow-hidden shadow-[inset_0_4px_20px_rgba(0,0,0,0.5)] relative"
             style={{ height: `${timelineHeight}px` }}
           >
             {/* Resize Handle */}
-            <div 
-              className="absolute top-0 left-0 right-0 h-1 cursor-row-resize z-50 hover:bg-amber-500/50 transition-colors"
-              onMouseDown={() => setIsResizingTimeline(true)}
-            />
+            <div
+              className={`absolute top-0 left-0 right-0 h-3 cursor-row-resize z-50 flex items-center justify-center group transition-colors ${isResizingTimeline ? 'bg-amber-500/30' : 'hover:bg-amber-500/15'}`}
+              onMouseDown={(e) => { e.preventDefault(); setIsResizingTimeline(true); }}
+            >
+              <div className={`flex gap-[3px] items-center transition-opacity ${isResizingTimeline ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+                {[0,1,2,3,4].map(i => (
+                  <div key={i} className={`w-5 h-[2px] rounded-full transition-colors ${isResizingTimeline ? 'bg-amber-400' : 'bg-slate-500 group-hover:bg-amber-500/70'}`} />
+                ))}
+              </div>
+            </div>
             
-            <div className="p-4 flex flex-col gap-2 h-full">
-              <h3 className="text-xs font-medium text-slate-400 shrink-0 select-none flex justify-between items-center">
-                 <div className="flex items-center gap-3">
-                   <span>Timeline</span>
-                   <button 
-                    onClick={togglePlayback}
-                    className="p-1 rounded-full bg-slate-800 border border-slate-700 hover:bg-slate-700 text-slate-300 hover:text-amber-400 transition-all active:scale-95 flex items-center justify-center"
-                   >
-                     {isPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
-                   </button>
-                   
-                   {/* Zoom Controls */}
-                   <div className="flex items-center gap-1 ml-2 bg-slate-900 border border-slate-800 rounded px-1 py-0.5">
-                     <button 
-                       onClick={() => setFollowPlayhead(!followPlayhead)}
-                       className={`p-1 transition-colors ${followPlayhead ? 'text-amber-500' : 'text-slate-400 hover:text-white'}`}
-                       title={followPlayhead ? "Disable Auto-scroll" : "Enable Auto-scroll"}
-                     >
-                       {followPlayhead ? <Link2 className="w-3.5 h-3.5" /> : <Link2Off className="w-3.5 h-3.5" />}
-                     </button>
-                     <div className="w-[1px] h-3 bg-slate-800"></div>
-                     <button 
-                       onClick={() => setShowShortcuts(true)}
-                       className="p-1 text-slate-400 hover:text-white transition-colors"
-                       title="Keyboard Shortcuts (?)"
-                     >
-                       <HelpCircle className="w-3.5 h-3.5" />
-                     </button>
-                     <div className="w-[1px] h-3 bg-slate-800"></div>
-                     <button 
-                       onClick={() => {
-                         const container = timelineContainerRef.current;
-                         if (!container) return;
-                         const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
-                         const newZoom = Math.max(2, zoomLevel / 1.25);
-                         setZoomLevel(newZoom);
-                         requestAnimationFrame(() => {
-                           if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2;
-                         });
-                       }}
-                       className="p-1 hover:text-white transition-colors"
-                       title="Zoom Out"
-                     >
-                        <X className="w-3 h-3 rotate-45" />
-                     </button>
-                     <div className="w-[1px] h-3 bg-slate-800"></div>
-                     <button 
-                       onClick={() => {
-                         const container = timelineContainerRef.current;
-                         if (!container) return;
-                         const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
-                         const newZoom = Math.min(500, zoomLevel * 1.25);
-                         setZoomLevel(newZoom);
-                         requestAnimationFrame(() => {
-                           if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2;
-                         });
-                       }}
-                       className="p-1 hover:text-white transition-colors"
-                       title="Zoom In"
-                     >
-                        <Play className="w-3 h-3 -rotate-90" />
-                     </button>
-                     <button 
-                       onClick={() => {
-                         const containerWidth = timelineContainerRef.current?.offsetWidth || 800;
-                         const duration = totalDuration;
-                         setZoomLevel(Math.max(2, (containerWidth - 40) / duration));
-                       }}
-                       className="p-1 px-1.5 hover:text-white transition-colors text-[9px] font-bold border-l border-slate-800"
-                       title="Fit to Screen"
-                     >
-                        FIT
-                     </button>
-                     <span className="text-[9px] text-slate-500 font-mono ml-1 w-6 text-center">{Math.round(zoomLevel / 20 * 100)}%</span>
-                      
-                      {/* View Mode Toggle */}
-                      <div className="flex items-center gap-1 border-l border-slate-800 ml-1 pl-1">
-                         <button 
-                           onClick={() => setTimelineViewMode('content')}
-                           className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition-colors ${timelineViewMode === 'content' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                           title="Show only content duration"
-                         >
-                           CONTENT
-                         </button>
-                         <button 
-                           onClick={() => setTimelineViewMode('video')}
-                           className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition-colors ${timelineViewMode === 'video' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                           title="Show full video duration"
-                         >
-                           VIDEO
-                         </button>
-                      </div>
-                   </div>
+            <div className="flex flex-col h-full overflow-hidden">
+              {/* Timeline Toolbar */}
+              <div className="shrink-0 px-3 py-2 flex items-center gap-2 border-b border-slate-800 bg-slate-900/80 select-none flex-wrap">
 
-                   {/* Volume Mix Controls */}
-                   <div className="hidden md:flex items-center gap-4 ml-4 border-l border-slate-800 pl-4 h-5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest hidden lg:inline">Original</span>
-                        <div className="flex items-center gap-1.5 group">
-                          <button onClick={() => setVideoVolume(videoVolume === 0 ? 0.1 : 0)} className="text-slate-400 hover:text-white transition-colors">
-                            {videoVolume === 0 ? <VolumeX className="w-3 h-3" /> : <Volume1 className="w-3 h-3" />}
-                          </button>
-                          <input 
-                            type="range" min="0" max="1" step="0.01" 
-                            value={videoVolume} 
-                            onChange={(e) => setVideoVolume(parseFloat(e.target.value))}
-                            className="w-12 lg:w-16 h-1 bg-slate-800 rounded-full appearance-none cursor-pointer accent-amber-500 hover:accent-amber-400 group-hover:bg-slate-700 transition-all opacity-40 hover:opacity-100"
-                            title="Original Video Volume"
-                          />
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest hidden lg:inline">Dub</span>
-                        <div className="flex items-center gap-1.5 group">
-                          <button onClick={() => setDubVolume(dubVolume === 0 ? 1 : 0)} className="text-slate-400 hover:text-white transition-colors">
-                            {dubVolume === 0 ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
-                          </button>
-                          <input 
-                            type="range" min="0" max="1" step="0.01" 
-                            value={dubVolume} 
-                            onChange={(e) => setDubVolume(parseFloat(e.target.value))}
-                            className="w-12 lg:w-16 h-1 bg-slate-800 rounded-full appearance-none cursor-pointer accent-amber-500 hover:accent-amber-400 group-hover:bg-slate-700 transition-all"
-                            title="Dub voice volume"
-                          />
-                        </div>
-                      </div>
-                   </div>
-                 </div>
-                 <span className="font-mono text-[10px] bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded text-slate-500">
-                   {formatTime(timelineCurrentTime)} / {formatTime(totalDuration)}
-                 </span>
-              </h3>
+                {/* Left: Label + Transport */}
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest hidden lg:block">Timeline</span>
+                  <div className="flex items-center gap-0.5 bg-slate-800 rounded-md p-0.5 border border-slate-700/50">
+                    <button
+                      onClick={togglePlayback}
+                      className={`w-7 h-7 flex items-center justify-center rounded transition-all active:scale-95 ${isPlaying ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-700 hover:text-amber-400'}`}
+                      title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                    >
+                      {isPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Time Display */}
+                <div className="font-mono text-[11px] bg-slate-950 border border-slate-800 px-2 py-1 rounded-md text-amber-400 tabular-nums shrink-0 shadow-inner">
+                  {formatTime(timelineCurrentTime)}
+                  <span className="text-slate-600 mx-1">/</span>
+                  <span className="text-slate-500">{formatTime(totalDuration)}</span>
+                </div>
+
+                <div className="w-px h-5 bg-slate-700 shrink-0" />
+
+                {/* Zoom Controls */}
+                <div className="flex items-center gap-0.5 bg-slate-800/80 border border-slate-700/50 rounded-md px-1 py-0.5 shrink-0">
+                  <button
+                    onClick={() => {
+                      const container = timelineContainerRef.current;
+                      if (!container) return;
+                      const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
+                      const newZoom = Math.max(2, zoomLevel / 1.25);
+                      setZoomLevel(newZoom);
+                      requestAnimationFrame(() => { if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2; });
+                    }}
+                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
+                    title="Zoom Out (Ctrl+-)"
+                  >
+                    <ZoomOut className="w-3.5 h-3.5" />
+                  </button>
+                  <span className="text-[9px] text-slate-500 font-mono w-8 text-center tabular-nums">{Math.round(zoomLevel / 20 * 100)}%</span>
+                  <button
+                    onClick={() => {
+                      const container = timelineContainerRef.current;
+                      if (!container) return;
+                      const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
+                      const newZoom = Math.min(500, zoomLevel * 1.25);
+                      setZoomLevel(newZoom);
+                      requestAnimationFrame(() => { if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2; });
+                    }}
+                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
+                    title="Zoom In (Ctrl++)"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                  </button>
+                  <div className="w-px h-3 bg-slate-700 mx-0.5" />
+                  <button
+                    onClick={() => {
+                      const containerWidth = timelineContainerRef.current?.offsetWidth || 800;
+                      setZoomLevel(Math.max(2, (containerWidth - 40) / totalDuration));
+                    }}
+                    className="px-1.5 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-white transition-colors text-[9px] font-bold"
+                    title="Fit to Screen"
+                  >
+                    FIT
+                  </button>
+                </div>
+
+                {/* View Mode */}
+                <div className="flex items-center gap-0.5 bg-slate-800/80 border border-slate-700/50 rounded-md p-0.5 shrink-0">
+                  <button
+                    onClick={() => setTimelineViewMode('content')}
+                    className={`px-2 h-5 rounded text-[9px] font-bold transition-colors ${timelineViewMode === 'content' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
+                    title="Show content duration"
+                  >CONTENT</button>
+                  <button
+                    onClick={() => setTimelineViewMode('video')}
+                    className={`px-2 h-5 rounded text-[9px] font-bold transition-colors ${timelineViewMode === 'video' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
+                    title="Show video duration"
+                  >VIDEO</button>
+                </div>
+
+                {/* Follow Playhead */}
+                <button
+                  onClick={() => setFollowPlayhead(!followPlayhead)}
+                  className={`w-7 h-7 flex items-center justify-center rounded-md border transition-colors shrink-0 ${followPlayhead ? 'bg-amber-500/15 border-amber-500/40 text-amber-400' : 'border-slate-700 text-slate-500 hover:text-white hover:border-slate-600'}`}
+                  title={followPlayhead ? 'Auto-scroll ON' : 'Auto-scroll OFF'}
+                >
+                  {followPlayhead ? <Link2 className="w-3.5 h-3.5" /> : <Link2Off className="w-3.5 h-3.5" />}
+                </button>
+
+                <div className="w-px h-5 bg-slate-700 shrink-0 hidden md:block" />
+
+                {/* Volume Mix */}
+                <div className="hidden md:flex items-center gap-3 shrink-0">
+                  <div className="flex items-center gap-1.5">
+                    <button onClick={() => setVideoVolume(videoVolume === 0 ? 0.5 : 0)} className={`transition-colors ${videoVolume === 0 ? 'text-slate-600' : 'text-slate-400 hover:text-white'}`} title="Toggle original audio">
+                      {videoVolume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume1 className="w-3.5 h-3.5" />}
+                    </button>
+                    <span className="text-[9px] text-slate-600 hidden lg:block">Orig</span>
+                    <input type="range" min="0" max="1" step="0.01" value={videoVolume}
+                      onChange={(e) => setVideoVolume(parseFloat(e.target.value))}
+                      className="w-14 h-1 accent-amber-500 cursor-pointer" title="Original volume" />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button onClick={() => setDubVolume(dubVolume === 0 ? 1 : 0)} className={`transition-colors ${dubVolume === 0 ? 'text-slate-600' : 'text-amber-500 hover:text-amber-400'}`} title="Toggle dub audio">
+                      {dubVolume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                    </button>
+                    <span className="text-[9px] text-slate-600 hidden lg:block">Dub</span>
+                    <input type="range" min="0" max="1" step="0.01" value={dubVolume}
+                      onChange={(e) => setDubVolume(parseFloat(e.target.value))}
+                      className="w-14 h-1 accent-amber-500 cursor-pointer" title="Dub volume" />
+                  </div>
+                </div>
+
+                {/* Keyboard Help */}
+                <button
+                  onClick={() => setShowShortcuts(true)}
+                  className="ml-auto w-7 h-7 flex items-center justify-center rounded-md border border-slate-700 text-slate-500 hover:text-white hover:border-slate-600 transition-colors shrink-0"
+                  title="Keyboard Shortcuts (?)"
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                </button>
+              </div>
               
               <div 
                 ref={timelineContainerRef}
-                className="flex-1 relative bg-slate-900 border-t border-slate-800 overflow-x-auto overflow-y-auto select-none custom-scrollbar pb-10"
+                className="flex-1 relative bg-slate-900 overflow-x-auto overflow-y-auto select-none custom-scrollbar"
                 onScroll={(e) => {
                   const target = e.currentTarget;
                   setTimelineScrollLeft(target.scrollLeft);
@@ -3811,35 +4052,39 @@ export default function App() {
                   {timelineRuler}
                 </div>
 
-                <div className="flex flex-col pt-2">
+                <div className="flex flex-col">
                   {/* Video Track */}
-                  <div className="h-[48px] border-b border-slate-800/30 relative group items-center flex">
-                    <div className="sticky left-0 z-20 h-full bg-slate-950/80 border-r border-slate-800 px-2 flex items-center justify-between w-32 shrink-0 select-none">
-                      <div className="flex items-center gap-1.5 overflow-hidden">
-                        <Film className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider truncate">Video</span>
-                      </div>
+                  <div className="h-[44px] border-b border-slate-800/50 relative group flex items-center hover:bg-slate-800/20 transition-colors">
+                    <div className="sticky left-0 z-20 h-full bg-slate-950 border-r border-slate-800 px-3 flex items-center gap-2 w-32 shrink-0 select-none">
+                      <div className="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0" />
+                      <Film className="w-3 h-3 text-slate-500 shrink-0" />
+                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider truncate">Video</span>
                     </div>
-                    <div className="relative flex-1 h-10">
-                       <div 
-                         className="bg-slate-800/40 border border-slate-700/50 rounded-sm relative overflow-hidden flex items-center pl-2 text-slate-600 pointer-events-none h-full"
-                         style={{ 
+                    <div className="relative flex-1 h-8 mx-1">
+                       <div
+                         className="h-full rounded relative overflow-hidden flex items-center pl-2 pointer-events-none"
+                         style={{
                            width: `${videoDuration * pixelsPerSecond}px`,
-                           minWidth: '4px'
+                           minWidth: '4px',
+                           background: 'linear-gradient(90deg, rgba(51,65,85,0.6) 0%, rgba(30,41,59,0.4) 100%)',
+                           border: '1px solid rgba(71,85,105,0.4)',
                          }}
                        >
-                         <div className="absolute inset-0 flex opacity-10 object-cover pointer-events-none" style={{ backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 60px, rgba(255,255,255,0.1) 60px, rgba(255,255,255,0.1) 62px)' }}></div>
-                         <span className="text-[9px] font-medium z-10 text-slate-500 truncate">{videoFile ? videoFile.name : 'No video'}</span>
+                         <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 40px, rgba(255,255,255,0.5) 40px, rgba(255,255,255,0.5) 41px)' }}></div>
+                         <Film className="w-2.5 h-2.5 text-slate-500 shrink-0 mr-1.5" />
+                         <span className="text-[9px] font-medium text-slate-500 truncate z-10">{videoFile ? videoFile.name : 'No video loaded'}</span>
                        </div>
                     </div>
                   </div>
 
                   {/* Subtitles Track */}
-                  <div className="h-[40px] border-b border-slate-800/30 relative group items-center flex">
-                    <div className="sticky left-0 z-20 h-full bg-slate-950/80 border-r border-slate-800 px-2 flex items-center justify-between w-32 shrink-0 select-none">
-                      <div className="flex items-center gap-1.5 overflow-hidden">
-                        <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider truncate">Text</span>
+                  <div className="h-[44px] border-b border-slate-800/50 relative group flex items-center hover:bg-slate-800/20 transition-colors">
+                    <div className="sticky left-0 z-20 h-full bg-slate-950 border-r border-slate-800 px-3 flex items-center gap-2 w-32 shrink-0 select-none">
+                      <div className="w-1.5 h-1.5 rounded-full bg-amber-500/70 shrink-0" />
+                      <FileText className="w-3 h-3 text-slate-500 shrink-0" />
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Text</span>
+                        {subtitles.length > 0 && <span className="text-[8px] text-slate-600 tabular-nums">{subtitles.length} clips</span>}
                       </div>
                     </div>
                     <div className="relative flex-1 h-full">
@@ -3874,11 +4119,13 @@ export default function App() {
                   </div>
 
                   {/* Dub Audio Track */}
-                  <div className="h-[52px] border-b border-slate-800/30 relative group items-center flex">
-                    <div className="sticky left-0 z-20 h-full bg-slate-950/80 border-r border-slate-800 px-2 flex items-center justify-between w-32 shrink-0 select-none">
-                      <div className="flex items-center gap-1.5 overflow-hidden">
-                        <Music className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider truncate">Dub</span>
+                  <div className="h-[60px] border-b border-slate-800/50 relative group flex items-center hover:bg-slate-800/20 transition-colors">
+                    <div className="sticky left-0 z-20 h-full bg-slate-950 border-r border-slate-800 px-3 flex items-center gap-2 w-32 shrink-0 select-none">
+                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/70 shrink-0" />
+                      <Music className="w-3 h-3 text-slate-500 shrink-0" />
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Dub</span>
+                        {audioClips.length > 0 && <span className="text-[8px] text-slate-600 tabular-nums">{audioClips.length} clips</span>}
                       </div>
                     </div>
                     <div className="relative flex-1 h-full">
@@ -3926,23 +4173,19 @@ export default function App() {
                 </div>
 
                 {/* Playhead indicator */}
-                <div 
-                   className="absolute top-0 bottom-0 w-[1.5px] bg-amber-400 z-[100] pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.5)]"
-                   style={{ 
-                     left: `${TIMELINE_LEFT_OFFSET + timelineCurrentTime * pixelsPerSecond}px` 
-                   }}
+                <div
+                  className="absolute top-0 bottom-0 z-[100] pointer-events-none"
+                  style={{ left: `${TIMELINE_LEFT_OFFSET + timelineCurrentTime * pixelsPerSecond}px` }}
                 >
-                   {/* Playhead handle */}
-                   <div 
-                      className="absolute top-0 left-1/2 -translate-x-1/2 bg-amber-400 text-amber-950 flex flex-col items-center justify-center shadow-lg"
-                      style={{ 
-                        width: '12px', 
-                        height: '16px', 
-                        clipPath: 'polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%)' 
-                      }}
-                   >
-                     <div className="w-[1.5px] h-2 bg-amber-950/40 mt-1"></div>
-                   </div>
+                  {/* Needle line with glow */}
+                  <div className="absolute top-0 bottom-0 w-[2px] -translate-x-1/2 bg-amber-400 shadow-[0_0_6px_2px_rgba(251,191,36,0.35)]" />
+                  {/* Triangle handle */}
+                  <div
+                    className="absolute top-0 -translate-x-1/2 bg-amber-400 shadow-[0_2px_8px_rgba(251,191,36,0.5)] flex items-start justify-center"
+                    style={{ width: '14px', height: '20px', clipPath: 'polygon(0 0, 100% 0, 100% 65%, 50% 100%, 0 65%)' }}
+                  >
+                    <div className="w-[1.5px] h-3 bg-amber-900/40 mt-1 rounded-full" />
+                  </div>
                 </div>
               </div>
             </div>
@@ -4003,26 +4246,9 @@ export default function App() {
                )}
              </div>
           </div>
-        </main>
+        {/* end timeline */}
 
-        {/* Right Panel: Subtitle List */}
-        <aside className="w-80 border-l border-slate-800 bg-slate-900/30 flex flex-col shrink-0 max-w-full">
-          <div className="p-4 border-b border-slate-800 flex items-center justify-between shrink-0">
-            <h3 className="text-xs font-bold text-slate-500 uppercase">អត្ថបទ SRT (Subtitles)</h3>
-            <div className="flex gap-2">
-              <button 
-                onClick={() => setIsBatchEditMode(!isBatchEditMode)}
-                className={`p-1.5 rounded transition ${isBatchEditMode ? 'bg-amber-500/20 text-amber-500' : 'hover:bg-slate-800 text-slate-500 hover:text-slate-300'}`}
-                title="Batch Edit"
-              >
-                <ListChecks className="w-4 h-4" />
-              </button>
-              <button className="p-1 hover:bg-slate-800 rounded">
-                 <Music className="w-4 h-4 text-slate-500" />
-              </button>
-            </div>
-          </div>
-          
+        {false && <aside>{/* dead code removed */}
           {isBatchEditMode && (
             <div className="p-3 border-b border-slate-800 bg-slate-800/20 text-xs flex flex-col gap-3 shrink-0">
               <div className="flex items-center justify-between">
@@ -4161,7 +4387,7 @@ export default function App() {
               </div>
             )}
           </div>
-        </aside>
+        </aside>}
       </div>
 
       {/* Settings Modal */}
@@ -4317,4 +4543,3 @@ const DebugOverlay = ({
     </div>
   );
 };
-

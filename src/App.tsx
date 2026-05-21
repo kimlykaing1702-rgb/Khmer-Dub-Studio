@@ -3,6 +3,10 @@ import React, { useEffect, useRef, useState, useMemo, useCallback, Component } f
 import { motion } from 'motion/react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import * as workspaceLib from './lib/workspace';
+import * as workspaceExport from './lib/workspace-export';
+import { WorkspaceManager } from './components/WorkspaceManager';
+import { WorkspaceData } from './lib/workspace-types';
 
 const TTS_VOICES = [
   { id: 'Puck', label: 'Male: Puck' },
@@ -357,6 +361,7 @@ interface TimelineClipProps {
   voice?: string;
   isActive: boolean;
   isSelected: boolean;
+  isDragging?: boolean;
   onSelect: () => void;
   onAutoTrim?: (id: number) => void;
   onDragStart: (e: React.PointerEvent, id: number, type: any) => void;
@@ -364,13 +369,15 @@ interface TimelineClipProps {
   onDragEnd: (e: React.PointerEvent) => void;
   isOverlapping?: boolean;
   emotions?: string[];
+  laneTopPct?: number;
+  laneHeightPct?: number;
 }
 
 const TimelineClip = React.memo(({
   id, type, startTime, endTime, text, zoomLevel, audioUrl, waveformPeaks,
   audioTrimStart, audioTrimEnd, audioDuration, engine, voice,
-  isActive, isSelected, onSelect, onAutoTrim, onDragStart, onDragMove, onDragEnd, isOverlapping,
-  emotions
+  isActive, isSelected, isDragging, onSelect, onAutoTrim, onDragStart, onDragMove, onDragEnd, isOverlapping,
+  emotions, laneTopPct, laneHeightPct
 }: TimelineClipProps) => {
   const [localWaveform, setLocalWaveform] = useState<number[] | undefined>(waveformPeaks);
 
@@ -441,8 +448,18 @@ const TimelineClip = React.memo(({
 
   return (
     <div 
-      className={`absolute top-1 bottom-1 rounded border cursor-grab active:cursor-grabbing transition-shadow timeline-clip ${getClipColor()} ${isSelected ? 'ring-2 ring-white z-50' : 'z-10'} group`}
-      style={{ left, width }}
+      className={`absolute rounded-lg border cursor-grab active:cursor-grabbing transition-all timeline-clip ${getClipColor()} ${isSelected ? 'ring-2 ring-white z-50' : 'z-10'} group overflow-hidden`}
+      style={{ 
+        left, 
+        width,
+        ...(laneTopPct !== undefined && laneHeightPct !== undefined
+          ? { top: `${laneTopPct + 2}%`, height: `${laneHeightPct - 4}%`, minHeight: '24px' }
+          : { top: '10%', height: '80%', minHeight: '28px' }),
+        opacity: isDragging ? 0.7 : 1,
+        transform: isDragging ? 'scale(1.02)' : 'none',
+        filter: isDragging ? 'drop-shadow(0 0 8px rgba(251,191,36,0.4))' : 'drop-shadow(0 0 0px transparent)',
+        transition: isDragging ? 'none' : 'all 0.2s ease-out'
+      }}
       onPointerDown={(e) => {
         onSelect();
         onDragStart(e, id, type);
@@ -453,30 +470,38 @@ const TimelineClip = React.memo(({
     >
       {type === 'subtitle' && (
         <>
-          <div className="absolute inset-0 px-2 flex items-center justify-center overflow-hidden pointer-events-none">
-            <span className="text-[10px] truncate font-medium">{text}</span>
+          <div className="absolute inset-0 px-3 py-1 flex items-center justify-center overflow-hidden pointer-events-none">
+            <span className="text-[11px] font-semibold truncate">{text}</span>
           </div>
+          
+          {/* Left Trim Handle - Improved */}
           <div 
-             className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-20 group"
+             className="absolute left-0 top-0 bottom-0 w-3 hover:bg-white/30 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
              onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-text-start'); }}
           >
-            <div className="absolute inset-y-1 left-0.5 w-[1px] bg-white/40 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="absolute inset-y-2 left-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
+            <div className="absolute inset-y-2 left-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
           </div>
+          
+          {/* Right Trim Handle - Improved */}
           <div 
-             className="absolute right-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-20 group"
+             className="absolute right-0 top-0 bottom-0 w-3 hover:bg-white/30 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
              onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-text-end'); }}
           >
-            <div className="absolute inset-y-1 right-0.5 w-[1px] bg-white/40 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="absolute inset-y-2 right-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
+            <div className="absolute inset-y-2 right-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
           </div>
         </>
       )}
 
       {type === 'audio' && (
         <>
+          {/* Waveform with Gradient */}
           {(localWaveform && localWaveform.length > 0) ? (
             <div 
-              className="absolute inset-0 h-full overflow-hidden pointer-events-none opacity-40 bg-black/10"
+              className="absolute inset-0 h-full overflow-hidden pointer-events-none"
             >
+              <div className="absolute inset-0 bg-gradient-to-b from-black/20 to-black/5 z-10" />
               <div
                 className="absolute h-full"
                 style={{
@@ -485,38 +510,90 @@ const TimelineClip = React.memo(({
                 }}
               >
                 <svg className="w-full h-full" preserveAspectRatio="none" viewBox={`0 0 ${localWaveform.length} 100`}>
+                  <defs>
+                    <linearGradient id={`waveGradient-${id}`} x1="0%" y1="0%" x2="0%" y2="100%">
+                      <stop offset="0%" stopColor="currentColor" stopOpacity="0.6" />
+                      <stop offset="100%" stopColor="currentColor" stopOpacity="0.2" />
+                    </linearGradient>
+                  </defs>
                   <path 
                     d={localWaveform.map((v, i) => `M${i},${50 - v * 45} L${i},${50 + v * 45}`).join(' ')} 
-                    stroke="currentColor" 
+                    stroke={`url(#waveGradient-${id})`}
                     strokeWidth="1.5" 
                   />
                 </svg>
               </div>
+
+              {/* Hatched overlay for trimmed regions */}
+              {Number.isFinite(audioTrimStart) && audioTrimStart! > 0 && (
+                <div
+                  className="absolute top-0 bottom-0 opacity-40"
+                  style={{
+                    left: 0,
+                    width: `${audioTrimStart! * zoomLevel}px`,
+                    background: 'repeating-linear-gradient(45deg, rgba(0,0,0,0.4) 0px, rgba(0,0,0,0.4) 1px, transparent 1px, transparent 3px)'
+                  }}
+                />
+              )}
+              {Number.isFinite(audioTrimEnd) && Number.isFinite(audioDuration) && audioTrimEnd! < audioDuration! && (
+                <div
+                  className="absolute top-0 bottom-0 opacity-40"
+                  style={{
+                    right: 0,
+                    width: `${(audioDuration! - audioTrimEnd!) * zoomLevel}px`,
+                    background: 'repeating-linear-gradient(45deg, rgba(0,0,0,0.4) 0px, rgba(0,0,0,0.4) 1px, transparent 1px, transparent 3px)'
+                  }}
+                />
+              )}
             </div>
           ) : audioUrl ? (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-50">
-              <span className="text-[8px] animate-pulse">Rebuilding waveform...</span>
+              <span className="text-[8px] animate-pulse">Building waveform...</span>
             </div>
           ) : null}
+
+          {/* Duration label inside clip */}
+          <div className="absolute inset-0 px-2 py-1 flex items-center justify-between pointer-events-none z-20">
+            <span className="text-[9px] font-bold text-white/80 bg-black/40 px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity">{duration.toFixed(2)}s</span>
+            {engine && voice && (
+              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <span className="text-[8px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/30 text-amber-300 border border-amber-500/50">{engine}</span>
+              </div>
+            )}
+          </div>
+          
+          {/* Overlap Warning Badge */}
+          {isOverlapping && (
+            <div className="absolute -top-4 left-1/2 -translate-x-1/2 bg-rose-500/80 text-white text-[8px] font-bold px-1.5 py-0.5 rounded-full border border-rose-400/50 shadow-lg shadow-rose-500/30 whitespace-nowrap z-30">
+              ⚠ Overlap
+            </div>
+          )}
+
+          {/* Left Trim Handle - Improved */}
           <div 
-             className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-20 group"
+             className="absolute left-0 top-0 bottom-0 w-3 hover:bg-white/20 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
              onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-audio-start'); }}
           >
-            <div className="absolute inset-y-1 left-0.5 w-[1px] bg-white/40 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="absolute inset-y-2 left-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
+            <div className="absolute inset-y-2 left-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
           </div>
+
+          {/* Right Trim Handle - Improved */}
           <div 
-             className="absolute right-0 top-0 bottom-0 w-2 hover:bg-white/20 cursor-ew-resize z-20 group"
+             className="absolute right-0 top-0 bottom-0 w-3 hover:bg-white/20 cursor-ew-resize z-20 group hover:shadow-lg hover:shadow-white/20"
              onPointerDown={(e) => { e.stopPropagation(); onDragStart(e, id, 'trim-audio-end'); }}
           >
-            <div className="absolute inset-y-1 right-0.5 w-[1px] bg-white/40 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity" />
+            <div className="absolute inset-y-2 right-1 w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
+            <div className="absolute inset-y-2 right-[6px] w-0.5 bg-white/50 group-hover:bg-white opacity-0 group-hover:opacity-100 transition-all" />
           </div>
+
           {onAutoTrim && (
             <button 
               onClick={(e) => { e.stopPropagation(); onAutoTrim(id); }}
-              className="absolute -top-6 left-1/2 -translate-x-1/2 px-1.5 py-0.5 bg-slate-800 border border-slate-700 rounded text-[9px] text-slate-300 hover:text-white hover:bg-slate-700 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-30 flex items-center gap-1"
+              className="absolute -top-7 left-1/2 -translate-x-1/2 px-2 py-1 bg-slate-800 border border-slate-700 rounded text-[9px] text-slate-300 hover:text-white hover:bg-slate-700 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap z-30 flex items-center gap-1 active:scale-95 shadow-lg"
               title="Auto Trim Silence"
             >
-              <ListChecks className="w-2.5 h-2.5" />
+              <ListChecks className="w-3 h-3" />
               Auto Trim
             </button>
           )}
@@ -1031,8 +1108,213 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
 
-  const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
-  const [speakers, setSpeakers] = useState<Speaker[]>([]);
+  // ── Auto-save / restore ──────────────────────────────────────────────────
+  // Subtitles are serialised to localStorage on every change (debounced 2s).
+  // Audio blobs / File objects can't be serialised, so only text/timing/meta
+  // survive a reload — that is still enough to avoid losing hours of editing.
+  const [subtitles, setSubtitles] = useState<Subtitle[]>(() => {
+    try {
+      const saved = localStorage.getItem('autosave_subtitles');
+      if (saved) {
+        const parsed: Subtitle[] = JSON.parse(saved);
+        // Strip un-serialisable fields that will be stale anyway
+        return parsed.map(s => ({
+          ...s,
+          audioUrl: undefined,
+          audioBlob: undefined,
+          waveformPeaks: undefined,
+          isGenerating: false,
+          refAudioFile: undefined,
+        }));
+      }
+    } catch { /* corrupt data – start fresh */ }
+    return [];
+  });
+
+  const [speakers, setSpeakers] = useState<Speaker[]>(() => {
+    try {
+      const saved = localStorage.getItem('autosave_speakers');
+      if (saved) {
+        const parsed: Speaker[] = JSON.parse(saved);
+        return parsed.map(s => ({ ...s, refAudioFile: null, refAudioBase64: null }));
+      }
+    } catch {}
+    return [];
+  });
+
+  // ── Workspace persistence system ─────────────────────────────────────────
+  const [currentWorkspaceId, setCurrentWorkspaceId] = useState<string>('');
+  const [currentWorkspace, setCurrentWorkspace] = useState<WorkspaceData | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
+  const workspaceAutoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Initialize workspace system on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const activeId = await workspaceLib.getOrCreateActiveWorkspace();
+        setCurrentWorkspaceId(activeId);
+        const workspace = await workspaceLib.loadWorkspace(activeId);
+        if (workspace) {
+          setCurrentWorkspace(workspace);
+          // Restore workspace state
+          setSubtitles(workspace.subtitles);
+          setSpeakers(workspace.speakers);
+          setTtsEngine(workspace.ttsSettings.ttsEngine);
+          setDefaultGeminiVoice(workspace.ttsSettings.defaultGeminiVoice as any);
+          setDefaultVoxCPMVoice(workspace.ttsSettings.defaultVoxCPMVoice);
+          if (workspace.videoBlob) {
+            const videoUrl = URL.createObjectURL(workspace.videoBlob);
+            setVideoUrl(videoUrl);
+            setVideoFile(new File([workspace.videoBlob], workspace.metadata.videoFileName));
+          }
+          setTimelineCurrentTime(workspace.uiState.timelineCurrentTime);
+          setIsDirty(false);
+        }
+      } catch (error) {
+        console.error('Failed to initialize workspace:', error);
+      }
+    })();
+  }, []);
+
+  // Mark as dirty when subtitles or speakers change
+  useEffect(() => {
+    if (currentWorkspace) {
+      setIsDirty(true);
+    }
+  }, [subtitles, speakers, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice, currentWorkspace]);
+
+  // Auto-save workspace
+  useEffect(() => {
+    if (!currentWorkspace || !isDirty) return;
+
+    if (workspaceAutoSaveRef.current) {
+      clearTimeout(workspaceAutoSaveRef.current);
+    }
+
+    workspaceAutoSaveRef.current = setTimeout(async () => {
+      try {
+        const workspace: WorkspaceData = {
+          ...currentWorkspace,
+          metadata: {
+            ...currentWorkspace.metadata,
+            lastModified: Date.now(),
+          },
+          subtitles,
+          speakers,
+          ttsSettings: {
+            ttsEngine,
+            defaultGeminiVoice,
+            defaultVoxCPMVoice,
+            voxcpmUrl: currentWorkspace.ttsSettings.voxcpmUrl,
+            geminiKey: currentWorkspace.ttsSettings.geminiKey,
+          },
+          uiState: {
+            ...currentWorkspace.uiState,
+            timelineCurrentTime,
+          },
+        };
+        await workspaceLib.saveWorkspace(workspace);
+        setCurrentWorkspace(workspace);
+        setIsDirty(false);
+      } catch (error) {
+        console.error('Failed to save workspace:', error);
+      }
+    }, 3000); // Save every 3 seconds when dirty
+
+    return () => {
+      if (workspaceAutoSaveRef.current) {
+        clearTimeout(workspaceAutoSaveRef.current);
+      }
+    };
+  }, [currentWorkspace, isDirty, subtitles, speakers, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice, timelineCurrentTime]);
+
+  const handleWorkspaceChange = async (workspaceId: string) => {
+    // Save current workspace if dirty
+    if (isDirty && currentWorkspace) {
+      try {
+        await workspaceLib.saveWorkspace(currentWorkspace);
+      } catch (error) {
+        console.error('Failed to save workspace:', error);
+      }
+    }
+
+    // Load new workspace
+    try {
+      const workspace = await workspaceLib.loadWorkspace(workspaceId);
+      if (workspace) {
+        setCurrentWorkspaceId(workspaceId);
+        setCurrentWorkspace(workspace);
+        setSubtitles(workspace.subtitles);
+        setSpeakers(workspace.speakers);
+        setTtsEngine(workspace.ttsSettings.ttsEngine);
+        setDefaultGeminiVoice(workspace.ttsSettings.defaultGeminiVoice as any);
+        setDefaultVoxCPMVoice(workspace.ttsSettings.defaultVoxCPMVoice);
+
+        if (workspace.videoBlob) {
+          const videoUrl = URL.createObjectURL(workspace.videoBlob);
+          setVideoUrl(videoUrl);
+          setVideoFile(new File([workspace.videoBlob], workspace.metadata.videoFileName));
+        } else {
+          setVideoUrl('');
+          setVideoFile(null);
+        }
+
+        setTimelineCurrentTime(workspace.uiState.timelineCurrentTime);
+        setIsDirty(false);
+      }
+    } catch (error) {
+      console.error('Failed to load workspace:', error);
+    }
+  };
+
+  // Debounced persist
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [autosaveStatus, setAutosaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const autosaveFlashRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    if (subtitles.length === 0) return;
+    setAutosaveStatus('saving');
+    autosaveTimerRef.current = setTimeout(() => {
+      try {
+        const toSave = subtitles.map(s => ({
+          ...s,
+          audioUrl: undefined,
+          audioBlob: undefined,
+          waveformPeaks: undefined,
+          isGenerating: false,
+          refAudioFile: undefined,
+        }));
+        localStorage.setItem('autosave_subtitles', JSON.stringify(toSave));
+        setAutosaveStatus('saved');
+        if (autosaveFlashRef.current) clearTimeout(autosaveFlashRef.current);
+        autosaveFlashRef.current = setTimeout(() => setAutosaveStatus('idle'), 3000);
+      } catch { /* storage full – ignore */ }
+    }, 2000);
+    return () => {
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+      if (autosaveFlashRef.current) clearTimeout(autosaveFlashRef.current);
+    };
+  }, [subtitles]);
+
+  useEffect(() => {
+    try {
+      const toSave = speakers.map(s => ({ ...s, refAudioFile: null, refAudioBase64: null }));
+      localStorage.setItem('autosave_speakers', JSON.stringify(toSave));
+    } catch {}
+  }, [speakers]);
+
+  // Warn before accidental close when there is unsaved work
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (subtitles.length === 0) return;
+      e.preventDefault();
+      e.returnValue = '';           // Chrome requires returnValue to be set
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [subtitles.length]);
 
   const formatSRTTime = (seconds: number) => {
     const pad = (num: number, size: number) => num.toString().padStart(size, '0');
@@ -1770,6 +2052,29 @@ export default function App() {
     return overlaps;
   }, [audioClips]);
 
+  // Assign each audio clip to a lane (row) so overlapping clips render in separate rows
+  const audioLanes = useMemo(() => {
+    const laneMap = new Map<number, number>(); // clipId -> laneIndex
+    const laneEnds: number[] = []; // end time of last clip in each lane
+    const sorted = [...audioClips].sort((a, b) => a.startTime - b.startTime);
+    for (const clip of sorted) {
+      let placed = false;
+      for (let lane = 0; lane < laneEnds.length; lane++) {
+        if (clip.startTime >= laneEnds[lane] - 0.01) {
+          laneMap.set(clip.id, lane);
+          laneEnds[lane] = clip.endTime;
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        laneMap.set(clip.id, laneEnds.length);
+        laneEnds.push(clip.endTime);
+      }
+    }
+    return { laneMap, laneCount: Math.max(1, laneEnds.length) };
+  }, [audioClips]);
+
 
 
   const visibleSubtitles = useMemo(() => {
@@ -2129,7 +2434,7 @@ export default function App() {
   const handleVideoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
-      
+
       console.log("file name", file.name);
       console.log("file type", file.type);
       console.log("file size", file.size);
@@ -2140,20 +2445,35 @@ export default function App() {
         URL.revokeObjectURL(videoUrl);
         allObjectUrlsRef.current.delete(videoUrl);
       }
-      
+
       // Use URL.createObjectURL directly as requested
       const url = URL.createObjectURL(file);
       allObjectUrlsRef.current.add(url);
       setVideoUrl(url);
       setErrorMsg(null);
-      
+
       const name = file.name.toLowerCase();
       const isUnsupported = name.endsWith('.mkv') || name.endsWith('.avi') || name.endsWith('.mov') || name.endsWith('.ts');
-      
+
       if (isUnsupported) {
         setShowMKVWarning(true);
       } else {
         setShowMKVWarning(false);
+      }
+
+      // Save video blob to workspace
+      if (currentWorkspace) {
+        const updatedWorkspace: WorkspaceData = {
+          ...currentWorkspace,
+          metadata: {
+            ...currentWorkspace.metadata,
+            videoFileName: file.name,
+            videoFileSize: file.size,
+          },
+          videoBlob: file,
+        };
+        setCurrentWorkspace(updatedWorkspace);
+        setIsDirty(true);
       }
     }
   };
@@ -2737,20 +3057,43 @@ export default function App() {
       duration = await getAudioDuration(url);
       waveformPeaks = await generateWaveform(url);
     }
+    // Stack new audio right after this subtitle's own previous clip (if any),
+    // so re-generating a single line never jumps to the end of all clips.
+    const thisClip = audioClips.find(c => c.id === sub.id);
+    const suggestedStart = thisClip
+      ? thisClip.endTime + 0.02            // stack after its own previous audio
+      : sub.startTime;                     // first generation – align to subtitle
+
     updateSubtitles((prev) =>
-      prev.map((s) => (s.id === sub.id ? { 
-        ...s, 
-        isGenerating: false, 
-        audioUrl: url || undefined, 
+      prev.map((s) => (s.id === sub.id ? {
+        ...s,
+        isGenerating: false,
+        audioUrl: url || undefined,
         audioBlob: blob || undefined,
-        audioDuration: duration || undefined, 
+        audioDuration: duration || undefined,
         waveformPeaks,
         audioBufferId: url || undefined,
         audioTrimStart: 0,
         audioTrimEnd: duration || undefined,
-        audioStartTime: s.startTime
+        audioStartTime: suggestedStart
       } : s))
     );
+
+    // Save audio blob to workspace
+    if (blob && currentWorkspace) {
+      const audioData = new Map(currentWorkspace.generatedAudio);
+      audioData.set(sub.id, {
+        blob,
+        duration: duration || 0,
+        waveformPeaks: waveformPeaks || [],
+      });
+      setCurrentWorkspace({
+        ...currentWorkspace,
+        generatedAudio: audioData,
+      });
+      setIsDirty(true);
+    }
+
     if (url) {
        // Stop any existing preview
        if (previewAudioRef.current) {
@@ -2768,6 +3111,8 @@ export default function App() {
   const handleGenerateAll = async () => {
     setErrorMsg(null);
     setIsGeneratingAll(true);
+    // Start from the latest end among existing audio clips to avoid overlaps
+    let currentMaxEnd = audioClips.reduce((m, c) => Math.max(m, c.endTime), 0);
     for (let i = 0; i < subtitles.length; i++) {
       if (subtitles[i].audioUrl) continue; // skip already generated
 
@@ -2786,23 +3131,44 @@ export default function App() {
         waveformPeaks = await generateWaveform(url);
       }
       
-      // Update with result
+      // Compute non-overlapping start time for this generated clip
+      const suggestedStart = Math.max(subtitles[i].startTime, currentMaxEnd + 0.02);
+
+      // Update with result (and set suggested audio start)
       updateSubtitles((prev) =>
         prev.map((s, idx) =>
-          idx === i ? { 
-            ...s, 
-            isGenerating: false, 
-            audioUrl: url || undefined, 
+          idx === i ? {
+            ...s,
+            isGenerating: false,
+            audioUrl: url || undefined,
             audioBlob: blob || undefined,
-            audioDuration: duration || undefined, 
+            audioDuration: duration || undefined,
             waveformPeaks,
             audioBufferId: url || undefined,
             audioTrimStart: 0,
             audioTrimEnd: duration || undefined,
-            audioStartTime: s.startTime
+            audioStartTime: suggestedStart
           } : s
         )
       );
+
+      // Save audio blob to workspace
+      if (blob && currentWorkspace) {
+        const audioData = new Map(currentWorkspace.generatedAudio);
+        audioData.set(subtitles[i].id, {
+          blob,
+          duration: duration || 0,
+          waveformPeaks: waveformPeaks || [],
+        });
+        setCurrentWorkspace({
+          ...currentWorkspace,
+          generatedAudio: audioData,
+        });
+        setIsDirty(true);
+      }
+
+      // Advance our current max end for subsequent clips in this batch
+      currentMaxEnd = suggestedStart + (duration || 0);
 
       if (!blob) {
         // Break the loop if there was an error (e.g., 429 quota exceeded)
@@ -3232,6 +3598,17 @@ export default function App() {
           </div>
           <span className="font-semibold tracking-tight text-lg">KhmerDub <span className="text-amber-500">Studio</span></span>
         </div>
+
+        {/* Workspace Manager */}
+        {currentWorkspaceId && (
+          <WorkspaceManager
+            currentWorkspaceId={currentWorkspaceId}
+            onWorkspaceChange={handleWorkspaceChange}
+            currentWorkspace={currentWorkspace}
+            isDirty={isDirty}
+          />
+        )}
+
         <div className="flex items-center gap-4">
           <button onClick={() => setShowSettings(true)} className="p-2 hover:bg-slate-800 rounded-md text-slate-400 hover:text-white transition-colors">
             <Settings className="w-5 h-5" />
@@ -3255,6 +3632,16 @@ export default function App() {
               <Redo2 className="w-4 h-4" />
             </button>
           </div>
+
+          {/* Autosave indicator */}
+          {autosaveStatus !== 'idle' && (
+            <div className={`flex items-center gap-1.5 text-[10px] font-medium px-2 py-1 rounded border transition-all ${autosaveStatus === 'saving' ? 'text-amber-400 border-amber-500/30 bg-amber-500/10' : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
+              {autosaveStatus === 'saving'
+                ? <><Loader2 className="w-3 h-3 animate-spin" />Saving…</>
+                : <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />Saved</>
+              }
+            </div>
+          )}
 
           <button className="px-4 py-1.5 bg-slate-800 rounded-md text-sm font-medium border border-slate-700 hidden md:block">រក្សាទុក</button>
           <button 
@@ -3333,6 +3720,23 @@ export default function App() {
                   className="absolute inset-0 opacity-0 cursor-pointer"
                 />
               </div>
+
+              {/* Clear saved session */}
+              {subtitles.length > 0 && (
+                <button
+                  onClick={() => {
+                    if (window.confirm('Clear all subtitles and the saved session? Audio clips will be lost.')) {
+                      localStorage.removeItem('autosave_subtitles');
+                      localStorage.removeItem('autosave_speakers');
+                      setSubtitles([]);
+                      setSpeakers([]);
+                    }
+                  }}
+                  className="w-full text-[10px] font-bold uppercase tracking-widest text-rose-500/70 hover:text-rose-400 border border-rose-500/20 hover:border-rose-500/50 rounded py-1.5 transition-colors bg-rose-500/5 hover:bg-rose-500/10"
+                >
+                  ✕ Clear Session
+                </button>
+              )}
 
               {/* Global Reference Audio Upload */}
               <div className="relative border border-dashed border-slate-700 hover:border-purple-500 hover:bg-slate-800/50 transition-colors rounded p-4 flex flex-col items-center justify-center group cursor-pointer h-24">
@@ -3835,129 +4239,162 @@ export default function App() {
             
             <div className="flex flex-col h-full overflow-hidden">
               {/* Timeline Toolbar */}
-              <div className="shrink-0 px-3 py-2 flex items-center gap-2 border-b border-slate-800 bg-slate-900/80 select-none flex-wrap">
+              <div className="shrink-0 px-3 py-2.5 flex items-center gap-3 border-b border-slate-800 bg-slate-900/80 select-none flex-wrap">
 
                 {/* Left: Label + Transport */}
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest hidden lg:block opacity-70">Timeline</span>
+                  
+                  {/* Enhanced Play Button */}
+                  <button
+                    onClick={togglePlayback}
+                    className={`w-8 h-8 flex items-center justify-center rounded-lg font-bold transition-all active:scale-95 shadow-lg ${
+                      isPlaying 
+                        ? 'bg-amber-500 text-slate-950 shadow-amber-500/50' 
+                        : 'bg-slate-800 border border-slate-700/50 text-slate-400 hover:text-amber-400 hover:border-amber-500/30 hover:shadow-amber-500/20'
+                    }`}
+                    title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                  >
+                    {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                  </button>
+                </div>
+
+                {/* Prominent Time Display */}
+                <div className="bg-slate-950/60 border border-amber-500/20 px-3 py-1.5 rounded-lg flex items-center gap-2 shrink-0 shadow-[inset_0_2px_8px_rgba(0,0,0,0.4)]">
+                  <span className="font-mono text-xs font-bold text-amber-400 tabular-nums tracking-wider">{formatTime(timelineCurrentTime)}</span>
+                  <span className="text-slate-600 text-xs">/</span>
+                  <span className="font-mono text-xs text-slate-500 tabular-nums">{formatTime(totalDuration)}</span>
+                </div>
+
+                <div className="w-px h-6 bg-slate-700/50 shrink-0 opacity-40" />
+
+                {/* Zoom Controls - Grouped */}
                 <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest hidden lg:block">Timeline</span>
-                  <div className="flex items-center gap-0.5 bg-slate-800 rounded-md p-0.5 border border-slate-700/50">
+                  <div className="flex items-center gap-1 bg-slate-800/80 border border-slate-700/50 rounded-lg px-1.5 py-1 shrink-0">
                     <button
-                      onClick={togglePlayback}
-                      className={`w-7 h-7 flex items-center justify-center rounded transition-all active:scale-95 ${isPlaying ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-700 hover:text-amber-400'}`}
-                      title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+                      onClick={() => {
+                        const container = timelineContainerRef.current;
+                        if (!container) return;
+                        const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
+                        const newZoom = Math.max(2, zoomLevel / 1.25);
+                        setZoomLevel(newZoom);
+                        requestAnimationFrame(() => { if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2; });
+                      }}
+                      className="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-700/80 text-slate-400 hover:text-white transition-colors active:scale-95"
+                      title="Zoom Out (Ctrl+-)"
                     >
-                      {isPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                      <ZoomOut className="w-4 h-4" />
                     </button>
+                    <div className="px-2 py-0.5 text-[10px] font-mono text-slate-500 tabular-nums whitespace-nowrap">{Math.round(zoomLevel / 20 * 100)}%</div>
+                    <button
+                      onClick={() => {
+                        const container = timelineContainerRef.current;
+                        if (!container) return;
+                        const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
+                        const newZoom = Math.min(500, zoomLevel * 1.25);
+                        setZoomLevel(newZoom);
+                        requestAnimationFrame(() => { if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2; });
+                      }}
+                      className="w-7 h-7 flex items-center justify-center rounded hover:bg-slate-700/80 text-slate-400 hover:text-white transition-colors active:scale-95"
+                      title="Zoom In (Ctrl++)"
+                    >
+                      <ZoomIn className="w-4 h-4" />
+                    </button>
+                    <div className="w-px h-4 bg-slate-700/40 mx-0.5" />
+                    <button
+                      onClick={() => {
+                        const containerWidth = timelineContainerRef.current?.offsetWidth || 800;
+                        setZoomLevel(Math.max(2, (containerWidth - 40) / totalDuration));
+                      }}
+                      className="px-2 h-7 flex items-center justify-center rounded hover:bg-slate-700/80 text-slate-400 hover:text-white transition-colors text-[10px] font-bold active:scale-95"
+                      title="Fit to Screen"
+                    >
+                      FIT
+                    </button>
+                  </div>
+
+                  {/* View Mode */}
+                  <div className="flex items-center gap-0.5 bg-slate-800/80 border border-slate-700/50 rounded-lg p-1 shrink-0">
+                    <button
+                      onClick={() => setTimelineViewMode('content')}
+                      className={`px-2.5 h-6 rounded text-[10px] font-bold transition-colors whitespace-nowrap ${timelineViewMode === 'content' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/20' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
+                      title="Show content duration"
+                    >CONTENT</button>
+                    <button
+                      onClick={() => setTimelineViewMode('video')}
+                      className={`px-2.5 h-6 rounded text-[10px] font-bold transition-colors whitespace-nowrap ${timelineViewMode === 'video' ? 'bg-amber-500 text-slate-950 shadow-lg shadow-amber-500/20' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
+                      title="Show video duration"
+                    >VIDEO</button>
                   </div>
                 </div>
 
-                {/* Time Display */}
-                <div className="font-mono text-[11px] bg-slate-950 border border-slate-800 px-2 py-1 rounded-md text-amber-400 tabular-nums shrink-0 shadow-inner">
-                  {formatTime(timelineCurrentTime)}
-                  <span className="text-slate-600 mx-1">/</span>
-                  <span className="text-slate-500">{formatTime(totalDuration)}</span>
-                </div>
-
-                <div className="w-px h-5 bg-slate-700 shrink-0" />
-
-                {/* Zoom Controls */}
-                <div className="flex items-center gap-0.5 bg-slate-800/80 border border-slate-700/50 rounded-md px-1 py-0.5 shrink-0">
-                  <button
-                    onClick={() => {
-                      const container = timelineContainerRef.current;
-                      if (!container) return;
-                      const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
-                      const newZoom = Math.max(2, zoomLevel / 1.25);
-                      setZoomLevel(newZoom);
-                      requestAnimationFrame(() => { if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2; });
-                    }}
-                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
-                    title="Zoom Out (Ctrl+-)"
-                  >
-                    <ZoomOut className="w-3.5 h-3.5" />
-                  </button>
-                  <span className="text-[9px] text-slate-500 font-mono w-8 text-center tabular-nums">{Math.round(zoomLevel / 20 * 100)}%</span>
-                  <button
-                    onClick={() => {
-                      const container = timelineContainerRef.current;
-                      if (!container) return;
-                      const centerTime = (container.scrollLeft + container.offsetWidth / 2) / zoomLevel;
-                      const newZoom = Math.min(500, zoomLevel * 1.25);
-                      setZoomLevel(newZoom);
-                      requestAnimationFrame(() => { if (container) container.scrollLeft = centerTime * newZoom - container.offsetWidth / 2; });
-                    }}
-                    className="w-6 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
-                    title="Zoom In (Ctrl++)"
-                  >
-                    <ZoomIn className="w-3.5 h-3.5" />
-                  </button>
-                  <div className="w-px h-3 bg-slate-700 mx-0.5" />
-                  <button
-                    onClick={() => {
-                      const containerWidth = timelineContainerRef.current?.offsetWidth || 800;
-                      setZoomLevel(Math.max(2, (containerWidth - 40) / totalDuration));
-                    }}
-                    className="px-1.5 h-6 flex items-center justify-center rounded hover:bg-slate-700 text-slate-400 hover:text-white transition-colors text-[9px] font-bold"
-                    title="Fit to Screen"
-                  >
-                    FIT
-                  </button>
-                </div>
-
-                {/* View Mode */}
-                <div className="flex items-center gap-0.5 bg-slate-800/80 border border-slate-700/50 rounded-md p-0.5 shrink-0">
-                  <button
-                    onClick={() => setTimelineViewMode('content')}
-                    className={`px-2 h-5 rounded text-[9px] font-bold transition-colors ${timelineViewMode === 'content' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                    title="Show content duration"
-                  >CONTENT</button>
-                  <button
-                    onClick={() => setTimelineViewMode('video')}
-                    className={`px-2 h-5 rounded text-[9px] font-bold transition-colors ${timelineViewMode === 'video' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                    title="Show video duration"
-                  >VIDEO</button>
-                </div>
-
-                {/* Follow Playhead */}
+                {/* Auto-scroll Toggle */}
                 <button
                   onClick={() => setFollowPlayhead(!followPlayhead)}
-                  className={`w-7 h-7 flex items-center justify-center rounded-md border transition-colors shrink-0 ${followPlayhead ? 'bg-amber-500/15 border-amber-500/40 text-amber-400' : 'border-slate-700 text-slate-500 hover:text-white hover:border-slate-600'}`}
+                  className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all active:scale-95 shrink-0 ${
+                    followPlayhead 
+                      ? 'bg-amber-500/15 border-amber-500/40 text-amber-400 shadow-lg shadow-amber-500/20' 
+                      : 'border-slate-700 text-slate-500 hover:text-white hover:border-slate-600/50'
+                  }`}
                   title={followPlayhead ? 'Auto-scroll ON' : 'Auto-scroll OFF'}
                 >
-                  {followPlayhead ? <Link2 className="w-3.5 h-3.5" /> : <Link2Off className="w-3.5 h-3.5" />}
+                  {followPlayhead ? <Link2 className="w-4 h-4" /> : <Link2Off className="w-4 h-4" />}
                 </button>
 
-                <div className="w-px h-5 bg-slate-700 shrink-0 hidden md:block" />
+                <div className="w-px h-6 bg-slate-700/50 shrink-0 opacity-40 hidden md:block" />
 
-                {/* Volume Mix */}
-                <div className="hidden md:flex items-center gap-3 shrink-0">
-                  <div className="flex items-center gap-1.5">
-                    <button onClick={() => setVideoVolume(videoVolume === 0 ? 0.5 : 0)} className={`transition-colors ${videoVolume === 0 ? 'text-slate-600' : 'text-slate-400 hover:text-white'}`} title="Toggle original audio">
-                      {videoVolume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume1 className="w-3.5 h-3.5" />}
+                {/* Volume Mix - Cleaner */}
+                <div className="hidden md:flex items-center gap-4 shrink-0 ml-auto">
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setVideoVolume(videoVolume === 0 ? 0.5 : 0)} 
+                      className={`w-7 h-7 flex items-center justify-center rounded-lg transition-all active:scale-95 ${videoVolume === 0 ? 'text-slate-600 bg-slate-800/30' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`} 
+                      title="Toggle original audio"
+                    >
+                      {videoVolume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume1 className="w-4 h-4" />}
                     </button>
-                    <span className="text-[9px] text-slate-600 hidden lg:block">Orig</span>
-                    <input type="range" min="0" max="1" step="0.01" value={videoVolume}
+                    <span className="text-[9px] text-slate-600 hidden lg:inline-block w-10">Original</span>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="1" 
+                      step="0.01" 
+                      value={videoVolume}
                       onChange={(e) => setVideoVolume(parseFloat(e.target.value))}
-                      className="w-14 h-1 accent-amber-500 cursor-pointer" title="Original volume" />
+                      className="w-20 h-1.5 accent-blue-500 cursor-pointer rounded-full" 
+                      title="Original volume" 
+                    />
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <button onClick={() => setDubVolume(dubVolume === 0 ? 1 : 0)} className={`transition-colors ${dubVolume === 0 ? 'text-slate-600' : 'text-amber-500 hover:text-amber-400'}`} title="Toggle dub audio">
-                      {dubVolume === 0 ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                  <div className="w-px h-5 bg-slate-700/40" />
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setDubVolume(dubVolume === 0 ? 1 : 0)} 
+                      className={`w-7 h-7 flex items-center justify-center rounded-lg transition-all active:scale-95 ${dubVolume === 0 ? 'text-slate-600 bg-slate-800/30' : 'text-amber-500 hover:text-amber-400 hover:bg-amber-500/10'}`} 
+                      title="Toggle dub audio"
+                    >
+                      {dubVolume === 0 ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                     </button>
-                    <span className="text-[9px] text-slate-600 hidden lg:block">Dub</span>
-                    <input type="range" min="0" max="1" step="0.01" value={dubVolume}
+                    <span className="text-[9px] text-slate-600 hidden lg:inline-block w-8">Dub</span>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="1" 
+                      step="0.01" 
+                      value={dubVolume}
                       onChange={(e) => setDubVolume(parseFloat(e.target.value))}
-                      className="w-14 h-1 accent-amber-500 cursor-pointer" title="Dub volume" />
+                      className="w-20 h-1.5 accent-amber-500 cursor-pointer rounded-full" 
+                      title="Dub volume" 
+                    />
                   </div>
                 </div>
 
                 {/* Keyboard Help */}
                 <button
                   onClick={() => setShowShortcuts(true)}
-                  className="ml-auto w-7 h-7 flex items-center justify-center rounded-md border border-slate-700 text-slate-500 hover:text-white hover:border-slate-600 transition-colors shrink-0"
+                  className="ml-auto md:ml-2 w-8 h-8 flex items-center justify-center rounded-lg border border-slate-700 text-slate-500 hover:text-white hover:border-slate-600 transition-colors shrink-0 active:scale-95"
                   title="Keyboard Shortcuts (?)"
                 >
-                  <HelpCircle className="w-3.5 h-3.5" />
+                  <HelpCircle className="w-4 h-4" />
                 </button>
               </div>
               
@@ -4053,45 +4490,44 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-col">
-                  {/* Video Track */}
-                  <div className="h-[44px] border-b border-slate-800/50 relative group flex items-center hover:bg-slate-800/20 transition-colors">
-                    <div className="sticky left-0 z-20 h-full bg-slate-950 border-r border-slate-800 px-3 flex items-center gap-2 w-32 shrink-0 select-none">
-                      <div className="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0" />
-                      <Film className="w-3 h-3 text-slate-500 shrink-0" />
-                      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider truncate">Video</span>
+                  {/* Video Track - Improved */}
+                  <div className="h-12 border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors">
+                    <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
+                      <div className="w-2 h-2 rounded-full bg-slate-500 shrink-0 shadow-lg shadow-slate-500/30" />
+                      <Film className="w-4 h-4 text-slate-400 shrink-0" />
+                      <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Video</span>
                     </div>
-                    <div className="relative flex-1 h-8 mx-1">
+                    <div className="relative flex-1 h-10 mx-2">
                        <div
-                         className="h-full rounded relative overflow-hidden flex items-center pl-2 pointer-events-none"
+                         className="h-full rounded-md relative overflow-hidden flex items-center pl-3 pointer-events-none border border-slate-700/20 shadow-inner"
                          style={{
                            width: `${videoDuration * pixelsPerSecond}px`,
                            minWidth: '4px',
-                           background: 'linear-gradient(90deg, rgba(51,65,85,0.6) 0%, rgba(30,41,59,0.4) 100%)',
-                           border: '1px solid rgba(71,85,105,0.4)',
+                           background: 'linear-gradient(135deg, rgba(71,85,105,0.4) 0%, rgba(51,65,85,0.3) 100%)',
                          }}
                        >
                          <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 40px, rgba(255,255,255,0.5) 40px, rgba(255,255,255,0.5) 41px)' }}></div>
-                         <Film className="w-2.5 h-2.5 text-slate-500 shrink-0 mr-1.5" />
-                         <span className="text-[9px] font-medium text-slate-500 truncate z-10">{videoFile ? videoFile.name : 'No video loaded'}</span>
+                         <Film className="w-3 h-3 text-slate-400 shrink-0 mr-2" />
+                         <span className="text-[10px] font-medium text-slate-400 truncate z-10">{videoFile ? videoFile.name : 'No video loaded'}</span>
                        </div>
                     </div>
                   </div>
 
-                  {/* Subtitles Track */}
-                  <div className="h-[44px] border-b border-slate-800/50 relative group flex items-center hover:bg-slate-800/20 transition-colors">
-                    <div className="sticky left-0 z-20 h-full bg-slate-950 border-r border-slate-800 px-3 flex items-center gap-2 w-32 shrink-0 select-none">
-                      <div className="w-1.5 h-1.5 rounded-full bg-amber-500/70 shrink-0" />
-                      <FileText className="w-3 h-3 text-slate-500 shrink-0" />
+                  {/* Subtitles Track - Improved */}
+                  <div className="h-12 border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors">
+                    <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
+                      <div className="w-2 h-2 rounded-full bg-amber-500 shrink-0 shadow-lg shadow-amber-500/40" />
+                      <FileText className="w-4 h-4 text-amber-400/70 shrink-0" />
                       <div className="flex flex-col min-w-0">
-                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Text</span>
-                        {subtitles.length > 0 && <span className="text-[8px] text-slate-600 tabular-nums">{subtitles.length} clips</span>}
+                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Text</span>
+                        {subtitles.length > 0 && <span className="text-[8px] text-slate-500 font-medium">{subtitles.length} clips</span>}
                       </div>
                     </div>
                     <div className="relative flex-1 h-full">
                       {visibleSubtitles.map((sub) => {
-                        const isDragging = dragVisuals && dragVisuals.id === sub.id;
-                        const sTime = isDragging ? dragVisuals.startTime : sub.startTime;
-                        const eTime = isDragging ? dragVisuals.endTime : sub.endTime;
+                        const isDragging = !!(dragVisuals && dragVisuals.id === sub.id);
+                        const sTime = isDragging ? dragVisuals!.startTime : sub.startTime;
+                        const eTime = isDragging ? dragVisuals!.endTime : sub.endTime;
 
                         return (
                                <TimelineClip 
@@ -4104,6 +4540,7 @@ export default function App() {
                                   zoomLevel={pixelsPerSecond}
                                   isActive={timelineCurrentTime >= sTime && timelineCurrentTime <= eTime}
                                   isSelected={selectedClipId?.id === sub.id && selectedClipId?.type === 'subtitle'}
+                                  isDragging={isDragging}
                                   onSelect={() => {
                                     setSelectedClipId({ id: sub.id, type: 'subtitle' });
                                   }}
@@ -4118,14 +4555,14 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Dub Audio Track */}
-                  <div className="h-[60px] border-b border-slate-800/50 relative group flex items-center hover:bg-slate-800/20 transition-colors">
-                    <div className="sticky left-0 z-20 h-full bg-slate-950 border-r border-slate-800 px-3 flex items-center gap-2 w-32 shrink-0 select-none">
-                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/70 shrink-0" />
-                      <Music className="w-3 h-3 text-slate-500 shrink-0" />
+                  {/* Dub Audio Track - Improved */}
+                  <div className="border-b border-slate-700/40 relative group flex items-center hover:bg-slate-800/40 transition-colors" style={{ height: `${Math.max(64, audioLanes.laneCount * 52)}px` }}>
+                    <div className="sticky left-0 z-20 h-full bg-gradient-to-r from-slate-950 to-slate-950/70 border-r border-slate-700 px-3 flex items-center gap-2.5 w-32 shrink-0 select-none">
+                      <div className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 shadow-lg shadow-emerald-500/40" />
+                      <Music className="w-4 h-4 text-emerald-400/70 shrink-0" />
                       <div className="flex flex-col min-w-0">
-                        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Dub</span>
-                        {audioClips.length > 0 && <span className="text-[8px] text-slate-600 tabular-nums">{audioClips.length} clips</span>}
+                        <span className="text-[11px] font-bold text-slate-300 uppercase tracking-wider truncate">Dub</span>
+                        {audioClips.length > 0 && <span className="text-[8px] text-slate-500 font-medium">{audioClips.length} clips</span>}
                       </div>
                     </div>
                     <div className="relative flex-1 h-full">
@@ -4135,11 +4572,14 @@ export default function App() {
                           const padding = 2;
                           return (clip.startTime <= viewportEndTime + padding) && (clip.endTime >= viewportStartTime - padding);
                       }).map((clip) => {
-                        const isDragging = dragVisuals && dragVisuals.id === clip.id;
-                        const sTime = isDragging ? dragVisuals.startTime : clip.startTime;
-                        const eTime = isDragging ? dragVisuals.endTime : clip.endTime;
-                        const tStart = isDragging ? dragVisuals.audioTrimStart : clip.audioTrimStart;
-                        const tEnd = isDragging ? dragVisuals.audioTrimEnd : clip.audioTrimEnd;
+                        const isDragging = !!(dragVisuals && dragVisuals.id === clip.id);
+                        const sTime = isDragging ? dragVisuals!.startTime : clip.startTime;
+                        const eTime = isDragging ? dragVisuals!.endTime : clip.endTime;
+                        const tStart = isDragging ? dragVisuals!.audioTrimStart : clip.audioTrimStart;
+                        const tEnd = isDragging ? dragVisuals!.audioTrimEnd : clip.audioTrimEnd;
+                        const lane = audioLanes.laneMap.get(clip.id) ?? 0;
+                        const laneHeight = 100 / audioLanes.laneCount;
+                        const laneTopPct = lane * laneHeight;
 
                         return (
                         <TimelineClip 
@@ -4158,10 +4598,13 @@ export default function App() {
                           voice={clip.voice}
                           isActive={timelineCurrentTime >= sTime && timelineCurrentTime < eTime}
                           isSelected={selectedClipId?.id === clip.id && selectedClipId?.type === 'audio'}
+                          isDragging={isDragging}
                           onSelect={() => setSelectedClipId({ id: clip.id, type: 'audio' })}
                           onDragStart={handleDragPointerDown}
                           onDragMove={handleDragPointerMove}
                           onDragEnd={handleDragPointerUp}
+                          laneTopPct={laneTopPct}
+                          laneHeightPct={laneHeight}
                           onAutoTrim={handleAutoTrim}
                           isOverlapping={audioOverlaps.has(clip.id)}
                           emotions={clip.emotions}
@@ -4172,19 +4615,20 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Playhead indicator */}
+                {/* Playhead indicator - Enhanced */}
                 <div
                   className="absolute top-0 bottom-0 z-[100] pointer-events-none"
                   style={{ left: `${TIMELINE_LEFT_OFFSET + timelineCurrentTime * pixelsPerSecond}px` }}
                 >
-                  {/* Needle line with glow */}
-                  <div className="absolute top-0 bottom-0 w-[2px] -translate-x-1/2 bg-amber-400 shadow-[0_0_6px_2px_rgba(251,191,36,0.35)]" />
-                  {/* Triangle handle */}
+                  {/* Wider needle line with enhanced glow */}
+                  <div className="absolute top-0 bottom-0 w-1 -translate-x-1/2 bg-gradient-to-r from-amber-400 to-amber-300 shadow-[0_0_12px_3px_rgba(251,191,36,0.5),0_0_24px_6px_rgba(251,191,36,0.25)]" />
+                  
+                  {/* Larger triangle handle with glow */}
                   <div
-                    className="absolute top-0 -translate-x-1/2 bg-amber-400 shadow-[0_2px_8px_rgba(251,191,36,0.5)] flex items-start justify-center"
-                    style={{ width: '14px', height: '20px', clipPath: 'polygon(0 0, 100% 0, 100% 65%, 50% 100%, 0 65%)' }}
+                    className="absolute top-0 -translate-x-1/2 bg-gradient-to-b from-amber-300 to-amber-400 shadow-[0_0_12px_2px_rgba(251,191,36,0.6),0_2px_8px_rgba(0,0,0,0.4)] flex items-start justify-center rounded-b-sm"
+                    style={{ width: '18px', height: '24px', clipPath: 'polygon(0 0, 100% 0, 100% 68%, 50% 100%, 0 68%)' }}
                   >
-                    <div className="w-[1.5px] h-3 bg-amber-900/40 mt-1 rounded-full" />
+                    <div className="w-1 h-3.5 bg-amber-900/30 mt-1 rounded-full" />
                   </div>
                 </div>
               </div>

@@ -1197,6 +1197,43 @@ export default function App() {
     };
   }, [currentWorkspace, isDirty, subtitles, speakers, ttsEngine, defaultGeminiVoice, defaultVoxCPMVoice, timelineCurrentTime]);
 
+  const handleManualSave = async () => {
+    if (!currentWorkspace) return;
+
+    setAutosaveStatus('saving');
+    try {
+      const workspace: WorkspaceData = {
+        ...currentWorkspace,
+        metadata: {
+          ...currentWorkspace.metadata,
+          lastModified: Date.now(),
+        },
+        subtitles,
+        speakers,
+        ttsSettings: {
+          ttsEngine,
+          defaultGeminiVoice,
+          defaultVoxCPMVoice,
+          voxcpmUrl: currentWorkspace.ttsSettings.voxcpmUrl,
+          geminiKey: currentWorkspace.ttsSettings.geminiKey,
+        },
+        uiState: {
+          ...currentWorkspace.uiState,
+          timelineCurrentTime,
+        },
+      };
+      await workspaceLib.saveWorkspace(workspace);
+      setCurrentWorkspace(workspace);
+      setIsDirty(false);
+      setAutosaveStatus('saved');
+      if (autosaveFlashRef.current) clearTimeout(autosaveFlashRef.current);
+      autosaveFlashRef.current = setTimeout(() => setAutosaveStatus('idle'), 3000);
+    } catch (error) {
+      console.error('Failed to save workspace:', error);
+      setAutosaveStatus('idle');
+    }
+  };
+
   const handleWorkspaceChange = async (workspaceId: string) => {
     // Save current workspace if dirty
     if (isDirty && currentWorkspace) {
@@ -3527,7 +3564,13 @@ export default function App() {
             </div>
           )}
 
-          <button className="px-4 py-1.5 bg-slate-800 rounded-md text-sm font-medium border border-slate-700 hidden md:block">រក្សាទុក</button>
+          <button
+            onClick={handleManualSave}
+            disabled={!isDirty}
+            className="px-4 py-1.5 bg-slate-800 rounded-md text-sm font-medium border border-slate-700 hidden md:block hover:bg-slate-700 disabled:opacity-50 transition-colors"
+          >
+            រក្សាទុក
+          </button>
           <button 
             disabled={isExportingAudio || audioClips.length === 0}
             onClick={handleExportDubbedWav}

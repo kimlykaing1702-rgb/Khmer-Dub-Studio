@@ -1590,7 +1590,7 @@ export default function App() {
   
   const audioClips = useMemo(() => {
     return subtitles
-      .filter(s => !!s.audioUrl)
+      .filter(s => !!s.audioUrl || !!s.audioBlob)
       .map(s => {
         const startTime = s.isLinked ? s.startTime : (s.audioStartTime ?? s.startTime);
         const audioDur = s.audioDuration || (s.endTime - s.startTime);
@@ -3342,7 +3342,7 @@ export default function App() {
       const totalDuration = maxEndTime + 1;
       
       const OfflineCtxClass = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
-      const sampleRate = 44100;
+      const sampleRate = 24000;
       const offlineCtx = new OfflineCtxClass(1, Math.ceil(sampleRate * totalDuration), sampleRate);
       
       setExportStatus("Decoding audio clips...");
@@ -3378,11 +3378,17 @@ export default function App() {
           source.connect(gainNode);
           gainNode.connect(offlineCtx.destination);
           
-          // Respect audio trims during export. 
+          // Respect audio trims during export.
           // source.start(when, offset, duration)
           const trimStart = clip.audioTrimStart ?? 0;
-          const duration = clip.duration; // Use the calculated duration from useMemo
-          source.start(clip.startTime, trimStart, duration);
+          const duration = (clip.duration && clip.duration > 0)
+            ? clip.duration
+            : undefined; // undefined = play to end of buffer
+          if (duration !== undefined) {
+            source.start(clip.startTime, trimStart, duration);
+          } else {
+            source.start(clip.startTime, trimStart);
+          }
           decodedCount++;
         } catch (e) {
           console.warn(`Failed to process audio for clip ${clip.id}:`, e);

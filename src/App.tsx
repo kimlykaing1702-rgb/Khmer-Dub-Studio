@@ -7,6 +7,7 @@ import * as workspaceLib from './lib/workspace';
 import * as workspaceExport from './lib/workspace-export';
 import { WorkspaceManager } from './components/WorkspaceManager';
 import { WorkspaceData } from './lib/workspace-types';
+import { handleExportDubbedWAV_FIXED, VirtualSubtitleList } from './patches/fixes';
 
 const TTS_VOICES = [
   { id: 'Puck', label: 'Male: Puck' },
@@ -179,44 +180,11 @@ function getAudioDuration(url: string): Promise<number> {
     };
   });
 }
+import { generateWaveformWorker as generateWaveform, globalWaveformCache } from './patches/fixes';
 
-const globalWaveformCache = new Map<string, number[]>();
 
-async function generateWaveform(url: string, numberOfSamples: number = 100): Promise<number[]> {
-  if (globalWaveformCache.has(url)) return globalWaveformCache.get(url)!;
-  try {
-    const response = await fetch(url);
-    const arrayBuffer = await response.arrayBuffer();
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    const channelData = audioBuffer.getChannelData(0);
-    
-    const samples = [];
-    const blockSize = Math.floor(channelData.length / numberOfSamples);
-    
-    for (let i = 0; i < numberOfSamples; i++) {
-        let sum = 0;
-        for (let j = 0; j < blockSize; j++) {
-            const val = channelData[Math.min(channelData.length - 1, i * blockSize + j)];
-            sum += val * val;
-        }
-        samples.push(Math.sqrt(sum / blockSize));
-    }
-    
-    // Close context to free resources
-    await audioContext.close();
-    
-    // Normalize samples with a bit of "boost" for visual appeal
-    const max = Math.max(...samples) || 1;
-    const normalized = samples.map(s => Math.pow(s / max, 0.8)); // Power curve to emphasize quieter parts
-    
-    globalWaveformCache.set(url, normalized);
-    return normalized;
-  } catch (e) {
-    console.warn('Failed to generate waveform', e);
-    return [];
-  }
-}
+
+
 
 async function autoTrimSilence(url: string, threshold: number = 0.015): Promise<{ start: number; end: number }> {
   try {
@@ -1598,13 +1566,15 @@ export default function App() {
         const trimEnd = s.audioTrimEnd ?? audioDur;
         const duration = trimEnd - trimStart;
         return {
-          ...s,
+          ...s,                    // ← this spreads audioBlob correctly
           startTime,
           endTime: startTime + duration,
           duration,
           audioTrimStart: trimStart,
           audioTrimEnd: trimEnd,
-          audioDuration: audioDur
+          audioDuration: audioDur,
+          // Ensure audioBlob is always present if we generated it
+          audioBlob: s.audioBlob,
         };
       });
   }, [subtitles]);
@@ -3328,106 +3298,14 @@ export default function App() {
   }, [subtitles, updateSubtitles]);
 
   const handleExportDubbedWav = async () => {
-    if (audioClips.length === 0) {
-      setErrorMsg("No generated audio clips to export.");
-      return;
-    }
-
-    setIsExportingAudio(true);
-    setExportStatus("Preparing...");
-    setErrorMsg(null);
-
-    try {
-      const maxEndTime = audioClips.reduce((max, c) => c.endTime > max ? c.endTime : max, 0);
-      const totalDuration = maxEndTime + 1;
-      
-      const OfflineCtxClass = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
-      const sampleRate = 24000;
-      const offlineCtx = new OfflineCtxClass(1, Math.ceil(sampleRate * totalDuration), sampleRate);
-      
-      setExportStatus("Decoding audio clips...");
-      
-      let decodedCount = 0;
-      let failedCount = 0;
-      const totalClips = audioClips.length;
-
-      // Load and schedule all audio clips
-      for (const clip of audioClips) {
-        try {
-          let arrayBuffer: ArrayBuffer;
-          
-          if (clip.audioBlob) {
-            arrayBuffer = await clip.audioBlob.arrayBuffer();
-          } else if (clip.audioUrl) {
-            const resp = await fetch(clip.audioUrl);
-            if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
-            arrayBuffer = await resp.arrayBuffer();
-          } else {
-            console.warn(`Clip ${clip.id} has no audio data, skipping.`);
-            continue;
-          }
-
-          const audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
-          
-          const source = offlineCtx.createBufferSource();
-          source.buffer = audioBuffer;
-          
-          const gainNode = offlineCtx.createGain();
-          gainNode.gain.value = dubVolume;
-          
-          source.connect(gainNode);
-          gainNode.connect(offlineCtx.destination);
-          
-          // Respect audio trims during export.
-          // source.start(when, offset, duration)
-          const trimStart = clip.audioTrimStart ?? 0;
-          const duration = (clip.duration && clip.duration > 0)
-            ? clip.duration
-            : undefined; // undefined = play to end of buffer
-          if (duration !== undefined) {
-            source.start(clip.startTime, trimStart, duration);
-          } else {
-            source.start(clip.startTime, trimStart);
-          }
-          decodedCount++;
-        } catch (e) {
-          console.warn(`Failed to process audio for clip ${clip.id}:`, e);
-          failedCount++;
-        }
-      }
-
-      if (decodedCount === 0) {
-        throw new Error(`No valid generated audio clips found. (Total: ${totalClips}, Failed: ${failedCount})`);
-      }
-
-      setExportStatus(`Rendering WAV (Clips: ${decodedCount}/${totalClips})...`);
-      const renderedBuffer = await offlineCtx.startRendering();
-      
-      // Convert to 16-bit PCM for WAV
-      const float32Array = renderedBuffer.getChannelData(0);
-      const int16Array = new Int16Array(float32Array.length);
-      for (let i = 0; i < float32Array.length; i++) {
-        const s = Math.max(-1, Math.min(1, float32Array[i]));
-        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
-
-      const wavBlob = encodeWAV(int16Array, renderedBuffer.sampleRate);
-      const url = createTrackedUrl(wavBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'dubbed-output.wav';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      
-      setExportStatus("Export complete!");
-      setTimeout(() => setExportStatus(null), 3000);
-    } catch (err) {
-      console.error('Failed to export dubbed WAV:', err);
-      setErrorMsg("Failed to export dubbed WAV.");
-    } finally {
-      setIsExportingAudio(false);
-    }
+    await handleExportDubbedWAV_FIXED(
+      audioClips,
+      dubVolume,
+      encodeWAV,
+      setIsExportingAudio,
+      setExportStatus,
+      setErrorMsg
+    );
   };
 
   // Synchronize audio playback with transport
@@ -4004,42 +3882,35 @@ export default function App() {
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            {subtitles.length > 0 ? (
-               <div className="flex flex-col">
-                 {subtitles.map((sub) => (
-                    <SubtitleListItem 
-                      key={sub.id}
-                      sub={sub}
-                      isActive={activeSub?.id === sub.id}
-                      isBatchEditMode={isBatchEditMode}
-                      selectedSubtitles={selectedSubtitles}
-                      previewingId={previewingId}
-                      isGeneratingAll={isGeneratingAll}
-                      ttsEngine={ttsEngine}
-                      defaultVoxCPMVoice={defaultVoxCPMVoice}
-                      referenceAudioFile={referenceAudioFile}
-                      referenceAudioBase64={referenceAudioBase64}
-                      handleToggleLink={handleToggleLink}
-                      toggleSubtitleSelection={toggleSubtitleSelection}
-                      handlePreviewAudio={handlePreviewAudio}
-                      handleGenerateSingle={handleGenerateSingle}
-                      handleEngineChange={handleEngineChange}
-                      handleVoiceChange={handleVoiceChange}
-                      handleSubReferenceAudioUpload={handleSubReferenceAudioUpload}
-                      playAudioFile={playAudioFile}
-                      updateSubtitles={updateSubtitles}
-                      videoRef={videoRef}
-                    />
-                  ))}
-               </div>
-            ) : (
-              <div className="h-full flex flex-col items-center justify-center text-center text-slate-600 p-4">
-                <FileText className="w-10 h-10 mb-3 opacity-20" />
-                <p className="text-sm">Upload an SRT file to load subtitles and generate dramatic Khmer audio.</p>
-              </div>
+          <VirtualSubtitleList
+            subtitles={subtitles}
+            scrollToActiveId={activeSub?.id}
+            renderItem={(sub) => (
+              <SubtitleListItem
+                key={sub.id}
+                sub={sub}
+                isActive={activeSub?.id === sub.id}
+                isBatchEditMode={isBatchEditMode}
+                selectedSubtitles={selectedSubtitles}
+                previewingId={previewingId}
+                isGeneratingAll={isGeneratingAll}
+                ttsEngine={ttsEngine}
+                defaultVoxCPMVoice={defaultVoxCPMVoice}
+                referenceAudioFile={referenceAudioFile}
+                referenceAudioBase64={referenceAudioBase64}
+                handleToggleLink={handleToggleLink}
+                toggleSubtitleSelection={toggleSubtitleSelection}
+                handlePreviewAudio={handlePreviewAudio}
+                handleGenerateSingle={handleGenerateSingle}
+                handleEngineChange={handleEngineChange}
+                handleVoiceChange={handleVoiceChange}
+                handleSubReferenceAudioUpload={handleSubReferenceAudioUpload}
+                playAudioFile={playAudioFile}
+                updateSubtitles={updateSubtitles}
+                videoRef={videoRef}
+              />
             )}
-          </div>
+          />
         </aside>
 
         {/* Center: Video Player Area — portrait 9:16 */}
@@ -4801,42 +4672,35 @@ export default function App() {
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar">
-            {subtitles.length > 0 ? (
-               <div className="flex flex-col">
-                 {subtitles.map((sub) => (
-                    <SubtitleListItem 
-                      key={sub.id}
-                      sub={sub}
-                      isActive={activeSub?.id === sub.id}
-                      isBatchEditMode={isBatchEditMode}
-                      selectedSubtitles={selectedSubtitles}
-                      previewingId={previewingId}
-                      isGeneratingAll={isGeneratingAll}
-                      ttsEngine={ttsEngine}
-                      defaultVoxCPMVoice={defaultVoxCPMVoice}
-                      referenceAudioFile={referenceAudioFile}
-                      referenceAudioBase64={referenceAudioBase64}
-                      handleToggleLink={handleToggleLink}
-                      toggleSubtitleSelection={toggleSubtitleSelection}
-                      handlePreviewAudio={handlePreviewAudio}
-                      handleGenerateSingle={handleGenerateSingle}
-                      handleEngineChange={handleEngineChange}
-                      handleVoiceChange={handleVoiceChange}
-                      handleSubReferenceAudioUpload={handleSubReferenceAudioUpload}
-                      playAudioFile={playAudioFile}
-                      updateSubtitles={updateSubtitles}
-                      videoRef={videoRef}
-                    />
-                  ))}
-               </div>
-            ) : (
-              <div className="h-full flex flex-col items-center justify-center text-center text-slate-600 p-4">
-                <FileText className="w-10 h-10 mb-3 opacity-20" />
-                <p className="text-sm">Upload an SRT file to load subtitles and generate dramatic Khmer audio.</p>
-              </div>
+          <VirtualSubtitleList
+            subtitles={subtitles}
+            scrollToActiveId={activeSub?.id}
+            renderItem={(sub) => (
+              <SubtitleListItem
+                key={sub.id}
+                sub={sub}
+                isActive={activeSub?.id === sub.id}
+                isBatchEditMode={isBatchEditMode}
+                selectedSubtitles={selectedSubtitles}
+                previewingId={previewingId}
+                isGeneratingAll={isGeneratingAll}
+                ttsEngine={ttsEngine}
+                defaultVoxCPMVoice={defaultVoxCPMVoice}
+                referenceAudioFile={referenceAudioFile}
+                referenceAudioBase64={referenceAudioBase64}
+                handleToggleLink={handleToggleLink}
+                toggleSubtitleSelection={toggleSubtitleSelection}
+                handlePreviewAudio={handlePreviewAudio}
+                handleGenerateSingle={handleGenerateSingle}
+                handleEngineChange={handleEngineChange}
+                handleVoiceChange={handleVoiceChange}
+                handleSubReferenceAudioUpload={handleSubReferenceAudioUpload}
+                playAudioFile={playAudioFile}
+                updateSubtitles={updateSubtitles}
+                videoRef={videoRef}
+              />
             )}
-          </div>
+          />
         </aside>}
       </div>
 

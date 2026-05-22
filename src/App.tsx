@@ -3118,9 +3118,10 @@ export default function App() {
   const handleGenerateAll = async () => {
     setErrorMsg(null);
     setIsGeneratingAll(true);
-    // Start from the latest end among existing audio clips to avoid overlaps
-    let currentMaxEnd = audioClips.reduce((m, c) => Math.max(m, c.endTime), 0);
-    for (let i = 0; i < subtitles.length; i++) {
+    try {
+      // Start from the latest end among existing audio clips to avoid overlaps
+      let currentMaxEnd = audioClips.reduce((m, c) => Math.max(m, c.endTime), 0);
+      for (let i = 0; i < subtitles.length; i++) {
       if (subtitles[i].audioUrl) continue; // skip already generated
 
       // Optimistic update for loading state
@@ -3187,18 +3188,32 @@ export default function App() {
       const audio = new Audio(url);
       previewAudioRef.current = audio;
       setPreviewingId(subtitles[i].id);
-        
+
       await new Promise<void>((resolve) => {
-         audio.onended = () => {
-            setPreviewingId(null);
-            resolve();
+         let resolved = false;
+         const cleanup = () => {
+           if (!resolved) {
+             resolved = true;
+             setPreviewingId(null);
+             resolve();
+           }
          };
+
+         audio.onended = () => cleanup();
+
+         // Try to play; then use the known `duration` (from getAudioDuration) as fallback.
          safePlay(audio).then(() => {
-            // Fallback for end in case onended doesn't fire as expected
-            const duration = audio.duration;
-            if (Number.isFinite(duration)) {
-              setTimeout(resolve, duration * 1000 + 100);
+            if (!resolved) {
+              if (Number.isFinite(duration) && duration > 0) {
+                setTimeout(cleanup, duration * 1000 + 200);
+              } else {
+                // Last-resort timeout to avoid hanging indefinitely
+                setTimeout(cleanup, 3000);
+              }
             }
+         }).catch(() => {
+           // If play fails, still ensure we don't hang forever
+           setTimeout(cleanup, 3000);
          });
       });
 
@@ -3207,7 +3222,12 @@ export default function App() {
         await new Promise((res) => setTimeout(res, 4100));
       }
     }
-    setIsGeneratingAll(false);
+    } catch (err) {
+      console.error('Failed generating all clips:', err);
+      setErrorMsg('Failed to generate all clips: ' + (err?.message ?? String(err)));
+    } finally {
+      setIsGeneratingAll(false);
+    }
   };
 
   const [isExportingAudio, setIsExportingAudio] = useState(false);
